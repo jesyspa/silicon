@@ -82,6 +82,56 @@ method insufficientSum(x: Ref, y: Ref)
   exhale acc(x.value)
 }
 
+// Snapshot consistency must survive consumption of every contributing chunk.
+method snapshotAfterConsumption(x: Ref, y: Ref)
+  requires x == y
+  requires acc(x.value, 1/2) && x.value == 1
+  requires acc(y.value, 1/2)
+{
+  var saved: Int := y.value
+  exhale acc(y.value, 1/2)
+  exhale acc(x.value, 1/2)
+  assert saved == 1
+}
+
+// Total permission bounds must survive consumption, including sums of three chunks.
+method upperBoundAfterConsumption(x: Ref, y: Ref, z: Ref)
+  requires x == y && y == z
+  requires acc(x.value, 1/2) && acc(y.value, 1/2) && acc(z.value, 1/2)
+{
+  exhale acc(z.value, 1/2)
+  exhale acc(y.value, 1/2)
+  exhale acc(x.value, 1/2)
+  assert false
+}
+
+function cellValue(x: Ref): Int
+  requires acc(cell(x), 1/2)
+{ unfolding acc(cell(x), 1/2) in x.value }
+
+method predicateSnapshotAfterConsumption(x: Ref, y: Ref)
+  requires x == y
+  requires acc(cell(x), 1/2) && cellValue(x) == 1
+  requires acc(cell(y), 1/2)
+{
+  var saved: Int := cellValue(y)
+  exhale acc(cell(y), 1/2)
+  exhale acc(cell(x), 1/2)
+  assert saved == 1
+}
+
+// A residual chunk can become empty after its snapshot was constrained.
+method zeroPermissionSnapshot(x: Ref, y: Ref, p: Perm)
+  requires x == y && none <= p && p < write
+  requires acc(x.value) && x.value == 1
+{
+  exhale acc(x.value, write - p)
+  inhale p == none
+  inhale acc(y.value) && y.value == 2
+  //:: ExpectedOutput(assert.failed:assertion.false)
+  assert false
+}
+
 method contradictoryAfterRetry(x: Ref, y: Ref)
   requires acc(x.value, 1/2) && x.value == 1
   requires acc(y.value, 1/2) && y.value == 2

@@ -184,7 +184,10 @@ class DefaultStateConsolidator(protected val config: Config) extends StateConsol
 
     val initial = (fr, destChunks, Seq[Chunk](), InsertionOrderedSet[Term]())
 
-    val result = newChunks.foldLeft(initial) { case ((fr1, accMergedChunks, accNewChunks, accSnapEqs), nextChunk) =>
+    val result = newChunks.foldLeft(initial) { case ((fr1, accMergedChunks, accNewChunks, previousSnapEqs), nextChunk) =>
+      val accSnapEqs =
+        if (literalBasicOnly) previousSnapEqs ++ deferredBasicAliasFacts(s, accMergedChunks, nextChunk)
+        else previousSnapEqs
       /* accMergedChunks: already merged chunks
        * accNewChunks: newly added chunks
        * accSnapEqs: collected snapshot equalities
@@ -206,6 +209,28 @@ class DefaultStateConsolidator(protected val config: Config) extends StateConsol
     }
     v.symbExLog.closeScope(sepIdentifier)
     result
+  }
+
+  private def deferredBasicAliasFacts(s: State, chunks: Seq[Chunk], next: Chunk): Seq[Term] = next match {
+    case next: BasicChunk =>
+      val aliases = chunks.collect {
+        case old: BasicChunk if old.id == next.id && old.resourceID == next.resourceID =>
+          val argsEqual = And(old.args.zip(next.args).map { case (a, b) => a === b })
+          (old, argsEqual)
+      }
+      // These facts must remain available even after all contributing chunks are consumed.
+      val snapshotFacts = aliases.map { case (old, argsEqual) =>
+        Implies(And(argsEqual, IsPositive(old.perm), IsPositive(next.perm)), old.snap === next.snap)
+      }
+      val boundFacts =
+        if (next.resourceID == FieldID && s.mayAssumeUpperBounds) {
+          val total = aliases.foldLeft(next.perm) { case (sum, (old, argsEqual)) =>
+            PermPlus(sum, Ite(argsEqual, old.perm, NoPerm))
+          }
+          Seq(PermAtMost(total, FullPerm))
+        } else Nil
+      snapshotFacts ++ boundFacts
+    case _ => Nil
   }
 
   private def findMatchingChunk(chunks: Iterable[Chunk], chunk: Chunk, literalBasicOnly: Boolean, v: Verifier): Option[Chunk] = {
