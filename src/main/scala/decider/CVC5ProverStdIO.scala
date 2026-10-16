@@ -59,7 +59,7 @@ class Cvc5ProverStdIO(uniqueId: String,
   }
 
   override def emitSettings(contents: Iterable[String]): Unit = {
-    optionsChanged()
+    contextChanged()
     emit(contents)
   }
 }

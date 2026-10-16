@@ -82,6 +82,7 @@ abstract class ProverStdIO(uniqueId: String,
   }
 
   def start(userArgsString: Option[String]): Unit = {
+    contextChanged()
     // Calling `start()` multiple times in a row would leak memory and prover processes.
     if (proverShutdownHook != null) {
       throw new AssertionError("stop() should be called between any pair of start() calls")
@@ -148,6 +149,7 @@ abstract class ProverStdIO(uniqueId: String,
    * the other side first, resulting in the close() method to terminate.
    */
   def stop(): Unit = {
+    contextChanged()
     this.synchronized {
       if (logfileWriter != null) {
         logfileWriter.flush()
@@ -192,6 +194,7 @@ abstract class ProverStdIO(uniqueId: String,
   }
 
   def pop(n: Int = 1): Unit = {
+    contextWeakened()
     val cmd = (if (n == 1) "(pop)" else "(pop " + n + ")") + " ; " + pushPopScopeDepth
     pushPopScopeDepth -= n
     writeLine(cmd)
@@ -199,6 +202,7 @@ abstract class ProverStdIO(uniqueId: String,
   }
 
   def emit(content: String): Unit = {
+    contextChanged()
     if (debugMode) {
       allEmits :+= content
     }
@@ -209,7 +213,7 @@ abstract class ProverStdIO(uniqueId: String,
   def getAllEmits() : Seq[String] = allEmits
 
   override def setOption(name: String, value: String): String = {
-    optionsChanged()
+    contextChanged()
     writeLine(s"(get-option :${name})")
     val oldVal = readLine()
     if (oldVal == "unsupported")
@@ -279,7 +283,7 @@ abstract class ProverStdIO(uniqueId: String,
       retrieveReasonUnknown()
     }
 
-    pop()
+    popProofScope()
 
     (result, endTime - startTime)
   }

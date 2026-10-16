@@ -35,7 +35,7 @@ private[decider] final class SuccessfulProofCache(capacity: Int, enabled: Boolea
     depth -= 1
   }
 
-  /** The caller supplies a monotonically changing prover-options epoch. */
+  /** The caller supplies a monotonically changing prover-context epoch. */
   def prove(term: Term, currentEpoch: Long)(query: => Boolean): Boolean = {
     if (epoch != currentEpoch) {
       clear()

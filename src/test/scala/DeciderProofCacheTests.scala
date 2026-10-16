@@ -13,8 +13,8 @@ import viper.silver.reporter.NoopReporter
 
 /** Exercises the Decider wiring with the configured SMT executable. */
 class DeciderProofCacheTests extends AnyFunSuite {
-  private def withDecider(test: Decider => Unit): Unit = {
-    val config = new Config(Seq())
+  private def withDecider(test: Decider => Unit, args: Seq[String] = Seq()): Unit = {
+    val config = new Config(args)
     Verifier.config = config
     val verifier = new BaseVerifier(config, "proof-cache-test") {
       val debugMode = false
@@ -83,6 +83,45 @@ class DeciderProofCacheTests extends AnyFunSuite {
       assert(d.check(t, 10000))
       d.prover.setOption("smt.random_seed", old)
       assert(queries(d) == 5)
+    }
+  }
+
+  private val rawWeakening: Seq[(String, Decider => Unit)] = Seq(
+    "pop" -> ((d: Decider) => d.prover.pop()),
+    "emitted pop" -> ((d: Decider) => d.prover.emit("(pop 1)")),
+    "reset-assertions" -> ((d: Decider) => d.prover.emit("(reset-assertions)")),
+    "reset" -> ((d: Decider) => {
+      d.prover.reset()
+      d.prover.emit("(set-option :print-success true)")
+    }))
+
+  rawWeakening.foreach { case (name, weaken) =>
+    test(s"raw prover $name invalidates proofs from a child-only contradiction") {
+      withDecider { d =>
+        d.prover.push()
+        d.prover.assume(False)
+        assert(d.check(False, 10000))
+        assert(d.check(False, 10000))
+        assert(queries(d) == 1 && hits(d) == 1)
+        weaken(d)
+        assert(!d.check(False, 10000))
+        assert(queries(d) == 2)
+      }
+    }
+  }
+
+  Seq("pop", "reset").foreach { operation =>
+    test(s"raw Z3 API $operation invalidates contradiction proofs") {
+      withDecider(d => {
+        d.prover.push()
+        d.prover.assume(False)
+        assert(d.check(False, 10000))
+        assert(d.check(False, 10000))
+        assert(queries(d) == 1 && hits(d) == 1)
+        if (operation == "pop") d.prover.pop() else d.prover.reset()
+        assert(!d.check(False, 10000))
+        assert(queries(d) == 2)
+      }, Seq("--prover", "Z3-API", viper.silicon.Silicon.dummyInputFilename))
     }
   }
 

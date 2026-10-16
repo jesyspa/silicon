@@ -42,9 +42,18 @@ trait ProverLike {
 }
 
 trait Prover extends ProverLike with StatefulComponent {
-  private var _optionsEpoch = 0L
-  final def optionsEpoch: Long = _optionsEpoch
-  protected final def optionsChanged(): Unit = { _optionsEpoch += 1 }
+  private var _contextEpoch = 0L
+  private var managedPop = false
+  final def contextEpoch: Long = _contextEpoch
+  protected final def contextChanged(): Unit = { _contextEpoch += 1 }
+  protected final def contextWeakened(): Unit = if (!managedPop) contextChanged()
+
+  /** Only for scopes whose proof lifetime is managed by the Decider or a query. */
+  private[silicon] final def popProofScope(): Unit = {
+    val previous = managedPop
+    managedPop = true
+    try pop() finally managedPop = previous
+  }
 
   def start(userArgsString: Option[String]): Unit
   def assert(goal: Term, timeout: Option[Int] = None): Boolean

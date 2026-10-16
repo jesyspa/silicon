@@ -112,6 +112,7 @@ class Z3ProverAPI(uniqueId: String,
   }
 
   def start(userArgsString: Option[String]): Unit = {
+    contextChanged()
     pushPopScopeDepth = 0
     lastTimeout = -1
 
@@ -195,6 +196,7 @@ class Z3ProverAPI(uniqueId: String,
   }
 
   def stop(): Unit = {
+    contextChanged()
     emittedPreambleString.clear()
     allDecls = Seq()
     preambleAssumptions = Seq()
@@ -225,12 +227,14 @@ class Z3ProverAPI(uniqueId: String,
   }
 
   def pop(n: Int = 1): Unit = {
+    contextWeakened()
     endPreamblePhase()
     prover.pop(n)
     pushPopScopeDepth -= n
   }
 
   def emit(content: String): Unit = {
+    contextChanged()
     if (preamblePhaseOver) {
       sys.error("emitting phase over")
     }
@@ -238,6 +242,7 @@ class Z3ProverAPI(uniqueId: String,
   }
 
   override def emit(contents: Iterable[String]): Unit = {
+    contextChanged()
     if (preamblePhaseOver) {
       sys.error("emitting phase over")
     }
@@ -247,7 +252,7 @@ class Z3ProverAPI(uniqueId: String,
   def getAllEmits(): Seq[String] = emittedPreambleString.toSeq
 
   override def emitSettings(contents: Iterable[String]): Unit = {
-    optionsChanged()
+    contextChanged()
     // we ignore this, don't know any better solution atm.
     // our settings are defined in this class (see above).
     // except we check if someone gives us our custom randomization string, in which
@@ -261,7 +266,7 @@ class Z3ProverAPI(uniqueId: String,
   }
 
   override def setOption(name: String, value: String): String = {
-    optionsChanged()
+    contextChanged()
     throw new ProverInteractionFailed(uniqueId, "Dynamically setting prover options via Z3 API is currently not supported.")
   }
 
@@ -328,7 +333,7 @@ class Z3ProverAPI(uniqueId: String,
     val res = prover.check()
     val endTime = System.currentTimeMillis()
     val result = res == Status.UNSATISFIABLE
-    pop()
+    popProofScope()
 
     if (!result) {
       retrieveAndSaveModel()

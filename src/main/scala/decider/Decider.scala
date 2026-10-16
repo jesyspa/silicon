@@ -258,7 +258,7 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
     def popScope(): Unit = {
       //val commentRecord = new CommentRecord("pop", null, null)
       //val sepIdentifier = symbExLog.openScope(commentRecord)
-      _prover.pop()
+      _prover.popProofScope()
       pathConditions.popScope()
       successfulProofs.pop()
       //symbExLog.closeScope(sepIdentifier)
@@ -416,7 +416,7 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
       val sepIdentifier = symbExLog.openScope(assertRecord)
 
       val asserted = isKnownToBeTrue(t)
-      val result = asserted || successfulProofs.prove(t, prover.optionsEpoch) {
+      val result = asserted || successfulProofs.prove(t, prover.contextEpoch) {
         proverAssert(t, timeout)
       }
 
