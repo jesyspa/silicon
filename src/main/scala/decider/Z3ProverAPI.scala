@@ -247,6 +247,7 @@ class Z3ProverAPI(uniqueId: String,
   def getAllEmits(): Seq[String] = emittedPreambleString.toSeq
 
   override def emitSettings(contents: Iterable[String]): Unit = {
+    optionsChanged()
     // we ignore this, don't know any better solution atm.
     // our settings are defined in this class (see above).
     // except we check if someone gives us our custom randomization string, in which
@@ -260,6 +261,7 @@ class Z3ProverAPI(uniqueId: String,
   }
 
   override def setOption(name: String, value: String): String = {
+    optionsChanged()
     throw new ProverInteractionFailed(uniqueId, "Dynamically setting prover options via Z3 API is currently not supported.")
   }
 

@@ -124,6 +124,9 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
   object decider extends Decider with StatefulComponent {
     private var _prover: Prover = _
     private var pathConditions: PathConditionStack = _
+    // JVM switch for paired measurements; no solver options are changed.
+    private val successfulProofs = new SuccessfulProofCache(1024,
+      enabled = !java.lang.Boolean.getBoolean("silicon.disableProofCache"))
 
     private var _declaredFreshFunctions: Set[FunctionDecl] = _ /* [BRANCH-PARALLELISATION] */
     private var _declaredFreshMacros: Vector[MacroDecl] = _
@@ -143,6 +146,7 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
     var debugVariableTypes : Map[String, PType] = Map.empty
 
     def setPcs(other: PathConditionStack) = {
+      successfulProofs.clear()
       /* [BRANCH-PARALLELISATION] */
       pathConditions = other
       while (prover.pushPopScopeDepth > 1){
@@ -167,6 +171,7 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
     }
 
     def createProver(proverName: String, userArgsString: Option[String]): Option[DependencyNotFoundError] = {
+      successfulProofs.clear()
       _prover = getProver(proverName)
 
       _prover.start(userArgsString) /* Cannot query prover version otherwise */
@@ -198,6 +203,7 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
     }
 
     override def setProverOptions(options: Map[String, String]): Unit = {
+      successfulProofs.clear()
       _proverOptions = _proverOptions ++ options
       val resetOptions = _proverOptions.map { case (k, v) => (k, _prover.setOption(k, v)) }
       _proverResetOptions = resetOptions ++ _proverResetOptions
@@ -206,6 +212,7 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
     override def getProverOptions(): Map[String, String] = _proverOptions
 
     override def resetProverOptions(): Unit = {
+      successfulProofs.clear()
       _proverResetOptions.foreach { case (k, v) => _prover.setOption(k, v) }
       _proverResetOptions = Map.empty
       _proverOptions = Map.empty
@@ -214,6 +221,7 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
     /* Life cycle */
 
     def start(): Unit = {
+      successfulProofs.reset()
       pathConditions = new LayeredPathConditionStack()
       _declaredFreshFunctions = if (Verifier.config.parallelizeBranches()) HashSet.empty else InsertionOrderedSet.empty /* [BRANCH-PARALLELISATION] */
       _declaredFreshMacros = Vector.empty
@@ -222,6 +230,7 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
     }
 
     def reset(): Unit = {
+      successfulProofs.reset()
       _prover.reset()
       pathConditions = new LayeredPathConditionStack()
       _declaredFreshFunctions = if (Verifier.config.parallelizeBranches()) HashSet.empty else InsertionOrderedSet.empty /* [BRANCH-PARALLELISATION] */
@@ -231,6 +240,7 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
     }
 
     def stop(): Unit = {
+      successfulProofs.clear()
       if (_prover != null) _prover.stop()
     }
 
@@ -241,6 +251,7 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
       //val sepIdentifier = symbExLog.openScope(commentRecord)
       pathConditions.pushScope()
       _prover.push(timeout = Verifier.config.pushTimeout.toOption)
+      successfulProofs.push()
       //symbExLog.closeScope(sepIdentifier)
     }
 
@@ -249,6 +260,7 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
       //val sepIdentifier = symbExLog.openScope(commentRecord)
       _prover.pop()
       pathConditions.popScope()
+      successfulProofs.pop()
       //symbExLog.closeScope(sepIdentifier)
     }
 
@@ -404,7 +416,9 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
       val sepIdentifier = symbExLog.openScope(assertRecord)
 
       val asserted = isKnownToBeTrue(t)
-      val result = asserted || proverAssert(t, timeout)
+      val result = asserted || successfulProofs.prove(t, prover.optionsEpoch) {
+        proverAssert(t, timeout)
+      }
 
       symbExLog.closeScope(sepIdentifier)
       result
@@ -553,7 +567,9 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
 
     /* Misc */
 
-    def statistics(): Map[String, String] = prover.statistics()
+    def statistics(): Map[String, String] = prover.statistics() ++ Map(
+      "decider-proof-cache-hits" -> successfulProofs.hits.toString,
+      "decider-proof-cache-queries" -> successfulProofs.queries.toString)
 
     override def generateModel(): Unit = proverAssert(False, Verifier.config.assertTimeout.toOption)
 

@@ -42,6 +42,10 @@ trait ProverLike {
 }
 
 trait Prover extends ProverLike with StatefulComponent {
+  private var _optionsEpoch = 0L
+  final def optionsEpoch: Long = _optionsEpoch
+  protected final def optionsChanged(): Unit = { _optionsEpoch += 1 }
+
   def start(userArgsString: Option[String]): Unit
   def assert(goal: Term, timeout: Option[Int] = None): Boolean
   def check(timeout: Option[Int] = None): Result

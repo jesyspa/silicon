@@ -209,6 +209,7 @@ abstract class ProverStdIO(uniqueId: String,
   def getAllEmits() : Seq[String] = allEmits
 
   override def setOption(name: String, value: String): String = {
+    optionsChanged()
     writeLine(s"(get-option :${name})")
     val oldVal = readLine()
     if (oldVal == "unsupported")

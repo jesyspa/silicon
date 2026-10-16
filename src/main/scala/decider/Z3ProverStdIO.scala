@@ -65,6 +65,7 @@ class Z3ProverStdIO(uniqueId: String,
   }
 
   override def emitSettings(contents: Iterable[String]): Unit = {
+    optionsChanged()
     emit(contents)
     if (Verifier.config.disableNL.getOrElse(false)) {
       comment("We disable non-linear integer arithmetic")

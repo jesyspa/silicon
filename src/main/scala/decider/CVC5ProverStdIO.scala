@@ -58,5 +58,8 @@ class Cvc5ProverStdIO(uniqueId: String,
     Paths.get(Verifier.config.cvc5Exe)
   }
 
-  override def emitSettings(contents: Iterable[String]): Unit = emit(contents)
+  override def emitSettings(contents: Iterable[String]): Unit = {
+    optionsChanged()
+    emit(contents)
+  }
 }
