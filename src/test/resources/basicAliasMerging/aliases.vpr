@@ -1,0 +1,92 @@
+// Any copyright is dedicated to the Public Domain.
+// http://creativecommons.org/publicdomain/zero/1.0/
+
+field value: Int
+predicate cell(x: Ref) { acc(x.value) }
+
+// Greedy consumption needs the sum, not merely one matching chunk.
+method sumAliases(x: Ref, y: Ref)
+  requires x == y
+  requires acc(x.value, 1/2) && acc(y.value, 1/2)
+{
+  exhale acc(x.value)
+}
+
+method sumPredicateAliases(x: Ref, y: Ref)
+  requires x == y
+  requires acc(cell(x), 1/2) && acc(cell(y), 1/2)
+{
+  exhale acc(cell(x))
+}
+
+method literalSum(x: Ref)
+  requires acc(x.value, 1/2) && acc(x.value, 1/2)
+{
+  exhale acc(x.value)
+}
+
+// Positive permissions on aliases must describe the same snapshot.
+method contradictorySnapshots(x: Ref, y: Ref)
+  requires x == y
+  requires acc(x.value, 1/2) && x.value == 1
+  requires acc(y.value, 1/2) && y.value == 2
+{
+  assert false
+}
+
+method aliasesInBranches(x: Ref, y: Ref, b: Bool)
+  requires acc(x.value, 1/2) && acc(y.value, 1/2)
+{
+  if (b) {
+    inhale x == y
+    exhale acc(x.value)
+  } else {
+    inhale x == y
+    exhale acc(y.value)
+  }
+}
+
+method contradictoryBranches(x: Ref, y: Ref, b: Bool)
+  requires acc(x.value, 1/2) && x.value == 1
+  requires acc(y.value, 1/2) && y.value == 2
+{
+  if (b) {
+    inhale x == y
+    assert false
+  } else {
+    inhale x == y
+    assert false
+  }
+}
+
+// A failed branch must not leave an alias or snapshot fact in its sibling.
+method branchIsolation(x: Ref, y: Ref, b: Bool)
+  requires acc(x.value, 1/2) && x.value == 1
+  requires acc(y.value, 1/2) && y.value == 2
+{
+  if (b) {
+    inhale x == y
+    assert false
+  } else {
+    assert x.value == 1 && y.value == 2
+    //:: ExpectedOutput(assert.failed:assertion.false)
+    assert false
+  }
+}
+
+method insufficientSum(x: Ref, y: Ref)
+  requires x == y
+  requires acc(x.value, 1/4) && acc(y.value, 1/4)
+{
+  //:: ExpectedOutput(exhale.failed:insufficient.permission)
+  exhale acc(x.value)
+}
+
+method contradictoryAfterRetry(x: Ref, y: Ref)
+  requires acc(x.value, 1/2) && x.value == 1
+  requires acc(y.value, 1/2) && y.value == 2
+{
+  inhale x == y
+  exhale acc(x.value)
+  assert false
+}
