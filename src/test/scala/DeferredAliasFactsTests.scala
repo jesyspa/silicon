@@ -26,6 +26,8 @@ class DeferredAliasFactsTests extends AnyFunSuite {
         val expected = Map(
           "separationAfterFold" -> (if (deferred) Nil else Seq("assert.failed:assertion.false")),
           "noSeparationFromHalves" -> Seq("assert.failed:assertion.false"),
+          "snapshotAfterPartialConsumption" -> (if (deferred || mode == "1") Nil else Seq("assert.failed:assertion.false")),
+          "independentPartialSnapshots" -> Seq("assert.failed:assertion.false"),
           "guardedArrayAssignment" -> (if (deferred || mode == "1") Nil else Seq("assignment.failed:insufficient.permission")),
           "independentArrayAssignment" -> Seq("assignment.failed:insufficient.permission"))
         assert(program.methods.map(_.name).toSet == expected.keySet)
