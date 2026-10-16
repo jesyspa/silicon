@@ -105,6 +105,16 @@ method upperBoundAfterConsumption(x: Ref, y: Ref, z: Ref)
   assert false
 }
 
+method upperBoundAfterLiteralMerge(x: Ref, y: Ref)
+  requires x == y
+  requires acc(x.value, 1/2) && acc(y.value, 1/4)
+{
+  inhale acc(x.value, 1/2)
+  exhale acc(x.value)
+  exhale acc(y.value, 1/4)
+  assert false
+}
+
 function cellValue(x: Ref): Int
   requires acc(cell(x), 1/2)
 { unfolding acc(cell(x), 1/2) in x.value }
