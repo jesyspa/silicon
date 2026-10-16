@@ -12,7 +12,7 @@ import viper.silicon.Config.ExhaleMode
 import viper.silicon.common.collections.immutable.InsertionOrderedSet
 import viper.silicon.interfaces.state._
 import viper.silicon.logger.records.data.{CommentRecord, SingleMergeRecord}
-import viper.silicon.resources.{FieldID, MagicWandID, NonQuantifiedPropertyInterpreter, PredicateID, Resources}
+import viper.silicon.resources.{BaseID, FieldID, MagicWandID, NonQuantifiedPropertyInterpreter, PredicateID, Resources}
 import viper.silicon.state._
 import viper.silicon.state.terms.{Trigger, _}
 import viper.silicon.state.terms.perms._
@@ -183,11 +183,18 @@ class DefaultStateConsolidator(protected val config: Config) extends StateConsol
     // bookkeeper.heapMergeIterations += 1
 
     val initial = (fr, destChunks, Seq[Chunk](), InsertionOrderedSet[Term]())
+    val basicIndex = if (literalBasicOnly) Some(new BasicMergeIndex(destChunks)) else None
 
     val result = newChunks.foldLeft(initial) { case ((fr1, accMergedChunks, accNewChunks, previousSnapEqs), nextChunk) =>
-      val accSnapEqs =
-        if (literalBasicOnly) previousSnapEqs ++ deferredBasicAliasFacts(s, accMergedChunks, nextChunk)
-        else previousSnapEqs
+      val matching = (basicIndex, nextChunk) match {
+        case (Some(index), next: BasicChunk) => index.literalMatch(next)
+        case _ => findMatchingChunk(accMergedChunks, nextChunk, literalBasicOnly, v)
+      }
+      val accSnapEqs = (basicIndex, nextChunk) match {
+        case (Some(index), next: BasicChunk) =>
+          previousSnapEqs ++ deferredBasicAliasFacts(s, index.peers(next), next, matching)
+        case _ => previousSnapEqs
+      }
       /* accMergedChunks: already merged chunks
        * accNewChunks: newly added chunks
        * accSnapEqs: collected snapshot equalities
@@ -195,15 +202,18 @@ class DefaultStateConsolidator(protected val config: Config) extends StateConsol
        *           sequence of destination chunks
        */
 
-      findMatchingChunk(accMergedChunks, nextChunk, literalBasicOnly, v) match {
+      matching match {
         case Some(ch) =>
           mergeChunks(fr1, s, ch, nextChunk, qvars, v) match {
             case Some((fr2, newChunk, snapEq)) =>
+              basicIndex.foreach(_.prepend(newChunk, Some(ch)))
               (fr2, newChunk +: accMergedChunks.filterNot(_ == ch), newChunk +: accNewChunks, accSnapEqs ++ snapEq)
             case None =>
+              basicIndex.foreach(_.prepend(nextChunk))
               (fr1, nextChunk +: accMergedChunks, nextChunk +: accNewChunks, accSnapEqs)
           }
         case None =>
+          basicIndex.foreach(_.prepend(nextChunk))
           (fr1, nextChunk +: accMergedChunks, nextChunk +: accNewChunks, accSnapEqs)
       }
     }
@@ -211,26 +221,53 @@ class DefaultStateConsolidator(protected val config: Config) extends StateConsol
     result
   }
 
-  private def deferredBasicAliasFacts(s: State, chunks: Seq[Chunk], next: Chunk): Seq[Term] = next match {
-    case next: BasicChunk =>
-      val aliases = chunks.collect {
-        case old: BasicChunk if old.id == next.id && old.resourceID == next.resourceID =>
-          val argsEqual = And(old.args.zip(next.args).map { case (a, b) => a === b })
-          (old, argsEqual)
+  // Both indexes mirror heap order and live only for one merge, within one heap partition.
+  private class BasicMergeIndex(chunks: Seq[Chunk]) {
+    private val byResource = scala.collection.mutable.Map.empty[(BaseID, BasicChunkIdentifier), List[BasicChunk]]
+    private val byLiteral = scala.collection.mutable.Map.empty[(BasicChunkIdentifier, Seq[Term]), List[BasicChunk]]
+    chunks.reverseIterator.foreach(ch => prepend(ch))
+
+    def peers(ch: BasicChunk): Seq[BasicChunk] = byResource.getOrElse((ch.resourceID, ch.id), Nil)
+    def literalMatch(ch: BasicChunk): Option[BasicChunk] =
+      byLiteral.getOrElse((ch.id, ch.args), Nil).headOption
+
+    def prepend(chunk: Chunk, replaced: Option[Chunk] = None): Unit = chunk match {
+      case ch: BasicChunk =>
+        val resourceKey = (ch.resourceID, ch.id)
+        val literalKey = (ch.id, ch.args)
+        val resourcePeers = byResource.getOrElse(resourceKey, Nil)
+        val literalPeers = byLiteral.getOrElse(literalKey, Nil)
+        byResource(resourceKey) = ch :: replaced.fold(resourcePeers)(old => resourcePeers.filterNot(_ == old))
+        byLiteral(literalKey) = ch :: replaced.fold(literalPeers)(old => literalPeers.filterNot(_ == old))
+      case _ =>
+    }
+  }
+
+  private def deferredBasicAliasFacts(s: State, peers: Seq[BasicChunk], next: BasicChunk,
+                                      literalMatch: Option[Chunk]): Seq[Term] = {
+    val aliases = peers.map { old =>
+      val argsEqual = And(old.args.zip(next.args).map { case (a, b) => a === b })
+      (old, argsEqual)
+    }
+    // These facts must remain available even after all contributing chunks are consumed.
+    // combineSnapshots entails the literal pair's guarded equality, including symbolic permissions.
+    val snapshotFacts =
+      if (next.perm == NoPerm) Nil
+      else aliases.collect {
+        case (old, argsEqual) if !literalMatch.contains(old) && old.perm != NoPerm &&
+          old.snap != next.snap && argsEqual != False =>
+          Implies(And(argsEqual, IsPositive(old.perm), IsPositive(next.perm)), old.snap === next.snap)
       }
-      // These facts must remain available even after all contributing chunks are consumed.
-      val snapshotFacts = aliases.map { case (old, argsEqual) =>
-        Implies(And(argsEqual, IsPositive(old.perm), IsPositive(next.perm)), old.snap === next.snap)
-      }
-      val boundFacts =
-        if (next.resourceID == FieldID && s.mayAssumeUpperBounds) {
-          val total = aliases.foldLeft(next.perm) { case (sum, (old, argsEqual)) =>
-            PermPlus(sum, Ite(argsEqual, old.perm, NoPerm))
-          }
-          Seq(PermAtMost(total, FullPerm))
-        } else Nil
-      snapshotFacts ++ boundFacts
-    case _ => Nil
+    val boundFacts =
+      if (next.resourceID == FieldID && s.mayAssumeUpperBounds) {
+        // Include the literal match before replacement: its permission is part of the total.
+        val total = aliases.foldLeft(next.perm) { case (sum, (old, argsEqual)) =>
+          if (old.perm == NoPerm || argsEqual == False) sum
+          else PermPlus(sum, Ite(argsEqual, old.perm, NoPerm))
+        }
+        Seq(PermAtMost(total, FullPerm))
+      } else Nil
+    snapshotFacts ++ boundFacts
   }
 
   private def findMatchingChunk(chunks: Iterable[Chunk], chunk: Chunk, literalBasicOnly: Boolean, v: Verifier): Option[Chunk] = {
