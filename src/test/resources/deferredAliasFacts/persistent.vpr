@@ -1,0 +1,48 @@
+// Any copyright is dedicated to the Public Domain.
+// http://creativecommons.org/publicdomain/zero/1.0/
+
+field ownedValue: Int
+predicate ownedCell(x: Ref) { acc(x.ownedValue) }
+
+method separationAfterFold(x: Ref, y: Ref)
+  requires acc(x.ownedValue) && acc(y.ownedValue)
+{
+  fold ownedCell(x)
+  fold ownedCell(y)
+  assert x != y
+}
+
+method noSeparationFromHalves(x: Ref, y: Ref)
+  requires acc(x.ownedValue, 1/2) && acc(y.ownedValue, 1/2)
+{
+  fold acc(ownedCell(x), 1/2)
+  fold acc(ownedCell(y), 1/2)
+  assert x != y
+}
+
+field arraySnapshot: Seq[Ref]
+field elementValue: Int
+
+method guardedArrayAssignment(x: Ref, y: Ref)
+  requires acc(x.arraySnapshot, wildcard) && |x.arraySnapshot| == 1
+  requires acc(y.arraySnapshot, wildcard) && |y.arraySnapshot| == 1
+  requires forall i: Int :: 0 <= i && i < |x.arraySnapshot| ==> acc(x.arraySnapshot[i].elementValue, 1/2)
+  requires forall i: Int :: 0 <= i && i < |y.arraySnapshot| ==> acc(y.arraySnapshot[i].elementValue, 1/2)
+{
+  var a: Ref := x.arraySnapshot[0]
+  var b: Ref := y.arraySnapshot[0]
+  var saved: Int := a.elementValue + b.elementValue
+  if (x == y) {
+    a.elementValue := saved
+  }
+}
+
+method independentArrayAssignment(x: Ref, y: Ref)
+  requires x != y
+  requires acc(x.arraySnapshot, wildcard) && |x.arraySnapshot| == 1
+  requires acc(y.arraySnapshot, wildcard) && |y.arraySnapshot| == 1
+  requires forall i: Int :: 0 <= i && i < |x.arraySnapshot| ==> acc(x.arraySnapshot[i].elementValue, 1/2)
+  requires forall i: Int :: 0 <= i && i < |y.arraySnapshot| ==> acc(y.arraySnapshot[i].elementValue, 1/2)
+{
+  x.arraySnapshot[0].elementValue := 4
+}

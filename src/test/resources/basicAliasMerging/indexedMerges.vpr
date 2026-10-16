@@ -60,16 +60,6 @@ method fractionalAliases(x: Ref, y: Ref)
   assert x != y
 }
 
-// Permission-derived separation must remain after fields are folded away.
-method separationAcrossFold(x: Ref, y: Ref)
-  requires acc(x.indexedValue) && acc(y.indexedValue)
-{
-  assert x != y
-  fold indexedCell(x)
-  fold indexedCell(y)
-  assert x != y
-}
-
 field indexedArray: Seq[Ref]
 field indexedElement: Int
 
