@@ -60,6 +60,8 @@ class MinimalStateConsolidator extends StateConsolidationRules {
   * additional properties from and about permissions, (non)aliasing, and field values.
   */
 class DefaultStateConsolidator(protected val config: Config) extends StateConsolidationRules {
+  private val deferBasicAliasMerging = java.lang.Boolean.getBoolean("silicon.deferBasicAliasMerging")
+
   def consolidate(s: State, v: Verifier): State = {
     val comLog = new CommentRecord("state consolidation", s, v.decider.pcs)
     val sepIdentifier = v.symbExLog.openScope(comLog)
@@ -82,7 +84,7 @@ class DefaultStateConsolidator(protected val config: Config) extends StateConsol
           val roundLog = new CommentRecord("Round " + fixedPointRound, s, v.decider.pcs)
           val roundSepIdentifier = v.symbExLog.openScope(roundLog)
 
-          val (_functionRecorder, _mergedChunks, _, snapEqs) = singleMerge(functionRecorder, s, destChunks, newChunks, (s.functionRecorderQuantifiedVariables() ++ s.packagingWandSnapshots).map(_._1), v)
+          val (_functionRecorder, _mergedChunks, _, snapEqs) = singleMerge(functionRecorder, s, destChunks, newChunks, (s.functionRecorderQuantifiedVariables() ++ s.packagingWandSnapshots).map(_._1), literalBasicOnly = false, v = v)
 
           snapEqs foreach (t => v.decider.assume(t, Option.when(debugOn)(DebugExp.createInstance("Snapshot Equations", true))))
 
@@ -149,7 +151,7 @@ class DefaultStateConsolidator(protected val config: Config) extends StateConsol
   def merge(fr1: FunctionRecorder, s: State, h: Heap, newH: Heap, v: Verifier): (FunctionRecorder, Heap) = {
     val mergeLog = new CommentRecord("Merge", null, v.decider.pcs)
     val sepIdentifier = v.symbExLog.openScope(mergeLog)
-    val (fr2, mergedChunks, newlyAddedChunks, snapEqs) = singleMerge(fr1, s, h.values.toSeq, newH.values.toSeq, (s.functionRecorderQuantifiedVariables() ++ s.packagingWandSnapshots).map(_._1), v)
+    val (fr2, mergedChunks, newlyAddedChunks, snapEqs) = singleMerge(fr1, s, h.values.toSeq, newH.values.toSeq, (s.functionRecorderQuantifiedVariables() ++ s.packagingWandSnapshots).map(_._1), deferBasicAliasMerging && !s.retrying, v)
 
     v.decider.assume(snapEqs, Option.when(debugOn)(DebugExp.createInstance("Snapshot", isInternal_ = true)), enforceAssumption = false)
 
@@ -169,6 +171,7 @@ class DefaultStateConsolidator(protected val config: Config) extends StateConsol
                           destChunks: Seq[Chunk],
                           newChunks: Seq[Chunk],
                           qvars: Seq[Var],
+                          literalBasicOnly: Boolean,
                           v: Verifier)
                          : (FunctionRecorder,
                             Seq[Chunk],
@@ -189,7 +192,7 @@ class DefaultStateConsolidator(protected val config: Config) extends StateConsol
        *           sequence of destination chunks
        */
 
-      findMatchingChunk(accMergedChunks, nextChunk, v) match {
+      findMatchingChunk(accMergedChunks, nextChunk, literalBasicOnly, v) match {
         case Some(ch) =>
           mergeChunks(fr1, s, ch, nextChunk, qvars, v) match {
             case Some((fr2, newChunk, snapEq)) =>
@@ -205,8 +208,11 @@ class DefaultStateConsolidator(protected val config: Config) extends StateConsol
     result
   }
 
-  private def findMatchingChunk(chunks: Iterable[Chunk], chunk: Chunk, v: Verifier): Option[Chunk] = {
+  private def findMatchingChunk(chunks: Iterable[Chunk], chunk: Chunk, literalBasicOnly: Boolean, v: Verifier): Option[Chunk] = {
     chunk match {
+      case chunk: BasicChunk if literalBasicOnly =>
+        // Leave prover aliases in the heap for full matching during retry consolidation.
+        chunkSupporter.findChunksWithID[BasicChunk](chunks, chunk.id).find(_.args == chunk.args)
       case chunk: BasicChunk =>
         chunkSupporter.findChunk[BasicChunk](chunks, chunk.id, chunk.args, v)
       case chunk: QuantifiedChunk => quantifiedChunkSupporter.findChunk(chunks, chunk, v)
