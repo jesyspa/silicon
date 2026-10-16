@@ -20,6 +20,29 @@ method noSeparationFromHalves(x: Ref, y: Ref)
   assert x != y
 }
 
+method snapshotAfterPartialConsumption(x: Ref, y: Ref)
+  requires acc(x.ownedValue, 1/2) && x.ownedValue == 7
+  requires acc(y.ownedValue, 1/2)
+{
+  var saved: Int := y.ownedValue
+  exhale acc(x.ownedValue, 1/4)
+  inhale x == y
+  exhale acc(x.ownedValue, 1/4)
+  exhale acc(y.ownedValue, 1/2)
+  assert saved == 7
+}
+
+method independentPartialSnapshots(x: Ref, y: Ref)
+  requires acc(x.ownedValue, 1/2) && x.ownedValue == 7
+  requires acc(y.ownedValue, 1/2) && y.ownedValue == 9
+{
+  var saved: Int := y.ownedValue
+  exhale acc(x.ownedValue, 1/4)
+  exhale acc(x.ownedValue, 1/4)
+  exhale acc(y.ownedValue, 1/2)
+  assert saved == 7
+}
+
 field arraySnapshot: Seq[Ref]
 field elementValue: Int
 
