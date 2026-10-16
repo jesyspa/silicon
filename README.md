@@ -131,12 +131,17 @@ method main() {
 
 > See [the documentation wiki](https://github.com/viperproject/documentation/wiki) for instructions on how to try out or install the Viper tools.
 
-* You need recent installations of
-  1. the [sbt build tool](https://www.scala-sbt.org/)
-  2. the [Z3 SMT solver](https://github.com/Z3Prover/z3/releases)
-  3. (optional) the [cvc5 SMT solver](https://github.com/cvc5/cvc5/releases)
+* Use the toolchain tested in [CI](.github/workflows/ci.yml):
+  1. Java 11, selected through `JAVA_HOME` and `PATH`
+  2. the [sbt build tool](https://www.scala-sbt.org/) (version selected by `project/build.properties`)
+  3. the [Z3 SMT solver](https://github.com/Z3Prover/z3/releases), version 4.16.0
+  4. (optional) the [cvc5 SMT solver](https://github.com/cvc5/cvc5/releases)
 * Clone this repository *recursively* by running:  
 `git clone --recursive https://github.com/viperproject/silicon`
+
+For each new Git worktree, run `./worktree-setup.sh` to initialize the pinned
+Silver submodule. The managed worktree allocator runs this idempotent script
+automatically.
 
 And then, from the cloned directory, with the `Z3_EXE` environment variable set appropriately;  
 * Compile and run with:  
