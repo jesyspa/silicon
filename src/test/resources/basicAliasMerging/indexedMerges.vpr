@@ -1,0 +1,106 @@
+// Any copyright is dedicated to the Public Domain.
+// http://creativecommons.org/publicdomain/zero/1.0/
+
+field indexedValue: Int
+field unrelatedValue: Int
+predicate indexedCell(x: Ref) { acc(x.indexedValue) }
+
+// Replacing a literal chunk must keep all other symbolic aliases in the bound.
+method replacementPeers(x: Ref, y: Ref, z: Ref)
+  requires x == y && y == z
+  requires acc(x.indexedValue, 1/4) && acc(y.indexedValue, 1/4)
+  requires acc(z.indexedValue, 1/4) && acc(x.unrelatedValue)
+{
+  inhale acc(x.indexedValue, 1/2)
+  exhale acc(x.indexedValue, 3/4)
+  exhale acc(y.indexedValue, 1/4)
+  exhale acc(z.indexedValue, 1/4)
+  assert false
+}
+
+// Symbolic permissions require both positive guards even on a literal match.
+method symbolicLiteralSnapshots(x: Ref, p: Perm, q: Perm)
+  requires none < p && none < q && p + q <= write
+  requires acc(x.indexedValue, p) && x.indexedValue == 7
+{
+  var saved: Int := x.indexedValue
+  inhale acc(x.unrelatedValue)
+  inhale acc(x.indexedValue, q) && x.indexedValue == 9
+  assert false
+}
+
+method emptyLiteralSnapshot(x: Ref, p: Perm)
+  requires none <= p && p < write
+  requires acc(x.indexedValue) && x.indexedValue == 7
+{
+  exhale acc(x.indexedValue, write - p)
+  inhale p == none
+  inhale acc(x.unrelatedValue)
+  inhale acc(x.indexedValue) && x.indexedValue == 9
+  assert x.indexedValue == 9
+  //:: ExpectedOutput(assert.failed:assertion.false)
+  assert false
+}
+
+// Predicate permissions have no field-style upper bound.
+method predicateAboveFull(x: Ref)
+  requires acc(indexedCell(x))
+{
+  inhale acc(indexedCell(x), 1/2)
+  exhale acc(indexedCell(x), 3/2)
+  //:: ExpectedOutput(assert.failed:assertion.false)
+  assert false
+}
+
+// A half-permission peer does not justify separation.
+method fractionalAliases(x: Ref, y: Ref)
+  requires acc(x.indexedValue, 1/2) && acc(y.indexedValue, 1/2)
+{
+  //:: ExpectedOutput(assert.failed:assertion.false)
+  assert x != y
+}
+
+// Permission-derived separation must remain after fields are folded away.
+method separationAcrossFold(x: Ref, y: Ref)
+  requires acc(x.indexedValue) && acc(y.indexedValue)
+{
+  assert x != y
+  fold indexedCell(x)
+  fold indexedCell(y)
+  assert x != y
+}
+
+field indexedArray: Seq[Ref]
+field indexedElement: Int
+
+// Guarded Basic snapshot equality must feed the quantified permission consumer.
+method aliasArrays(x: Ref, y: Ref)
+  requires x == y
+  requires acc(x.indexedArray, 1/2) && |x.indexedArray| == 1
+  requires acc(y.indexedArray, 1/2) && |y.indexedArray| == 1
+  requires forall i: Int :: 0 <= i && i < |x.indexedArray| ==> acc(x.indexedArray[i].indexedElement, 1/2)
+  requires forall i: Int :: 0 <= i && i < |y.indexedArray| ==> acc(y.indexedArray[i].indexedElement, 1/2)
+{
+  x.indexedArray[0].indexedElement := 4
+}
+
+method independentArrays(x: Ref, y: Ref)
+  requires x != y
+  requires acc(x.indexedArray, 1/2) && |x.indexedArray| == 1
+  requires acc(y.indexedArray, 1/2) && |y.indexedArray| == 1
+  requires forall i: Int :: 0 <= i && i < |x.indexedArray| ==> acc(x.indexedArray[i].indexedElement, 1/2)
+  requires forall i: Int :: 0 <= i && i < |y.indexedArray| ==> acc(y.indexedArray[i].indexedElement, 1/2)
+{
+  //:: ExpectedOutput(assignment.failed:insufficient.permission)
+  x.indexedArray[0].indexedElement := 4
+}
+
+// Reserve heaps are distinct ownership partitions, not peers in one total bound.
+method wandPartition(x: Ref)
+  requires acc(x.indexedValue)
+{
+  package acc(x.indexedValue) --* acc(x.indexedValue) { }
+  exhale acc(x.indexedValue)
+  //:: ExpectedOutput(assert.failed:assertion.false)
+  assert false
+}
