@@ -39,6 +39,17 @@ abstract class ProverStdIO(uniqueId: String,
   protected var output: PrintWriter = _
   protected var allDecls: Seq[Decl] = Seq()
   protected var allEmits: Seq[String] = Seq()
+  private var proofPortfolio: InjectivityProofPortfolio.Capture = _
+  private var portfolioPaused = false
+  private var portfolioGoal = false
+  /* The first failure of a probe exchange. Once set, the channel framing is unknown, so no further
+   * protocol I/O happens on this instance, and neither stop() nor reset() makes it usable again. */
+  @volatile private var poisoned: Throwable = _
+  private val poisonDisposing = new java.util.concurrent.atomic.AtomicBoolean(false)
+  private val streamsClosing = new java.util.concurrent.atomic.AtomicBoolean(false)
+  @volatile private var processDisposed = false
+  @volatile private var streamsDisposed = false
+  protected def poisonDisposalComplete: Boolean = processDisposed && streamsDisposed
 
   var proverPath: Path = _
   var lastReasonUnknown : String = _
@@ -53,6 +64,7 @@ abstract class ProverStdIO(uniqueId: String,
 
   @inline
   private def readLineFromInput(): String = {
+    usable()
     val line = input.readLine()
 
     if (line == null) {
@@ -82,12 +94,19 @@ abstract class ProverStdIO(uniqueId: String,
   }
 
   def start(userArgsString: Option[String]): Unit = {
+    usable()
     // Calling `start()` multiple times in a row would leak memory and prover processes.
     if (proverShutdownHook != null) {
       throw new AssertionError("stop() should be called between any pair of start() calls")
     }
     pushPopScopeDepth = 0
     lastTimeout = -1
+    portfolioPaused = false
+    portfolioGoal = false
+    proofPortfolio = if (this.isInstanceOf[Z3ProverStdIO] &&
+      java.lang.Boolean.getBoolean("silicon.injectivityProofPortfolio") && userArgsString.isEmpty &&
+      Verifier.config.counterexample.toOption.isEmpty && !debugMode)
+      new InjectivityProofPortfolio.Capture else null
     logfileWriter = if (!Verifier.config.outputProverLog) null else viper.silver.utility.Common.PrintWriter(Verifier.config.proverLogFile(uniqueId).toFile)
     proverPath = getProverPath
     prover = createProverInstance(userArgsString)
@@ -148,6 +167,7 @@ abstract class ProverStdIO(uniqueId: String,
    * the other side first, resulting in the close() method to terminate.
    */
   def stop(): Unit = {
+    if (poisoned != null) return disposePoisoned()
     this.synchronized {
       if (logfileWriter != null) {
         logfileWriter.flush()
@@ -177,6 +197,10 @@ abstract class ProverStdIO(uniqueId: String,
         Runtime.getRuntime.removeShutdownHook(proverShutdownHook)
         proverShutdownHook = null
       }
+      if (proofPortfolio != null) proofPortfolio.clear()
+      proofPortfolio = null
+      portfolioGoal = false
+      portfolioPaused = false
       allDecls = Seq()
       allEmits = Seq()
       preambleAssumptions = Seq()
@@ -185,6 +209,7 @@ abstract class ProverStdIO(uniqueId: String,
 
   def push(n: Int = 1, timeout: Option[Int] = None): Unit = {
     setTimeout(timeout)
+    if (proofPortfolio != null && !portfolioPaused) proofPortfolio.push(n)
     pushPopScopeDepth += n
     val cmd = (if (n == 1) "(push)" else "(push " + n + ")") + " ; " + pushPopScopeDepth
     writeLine(cmd)
@@ -193,6 +218,7 @@ abstract class ProverStdIO(uniqueId: String,
 
   def pop(n: Int = 1): Unit = {
     val cmd = (if (n == 1) "(pop)" else "(pop " + n + ")") + " ; " + pushPopScopeDepth
+    if (proofPortfolio != null && !portfolioPaused) proofPortfolio.pop(n)
     pushPopScopeDepth -= n
     writeLine(cmd)
     readSuccess()
@@ -202,7 +228,10 @@ abstract class ProverStdIO(uniqueId: String,
     if (debugMode) {
       allEmits :+= content
     }
+    if (proofPortfolio != null && (content.startsWith("(push") || content.startsWith("(pop") || content.startsWith("(reset")))
+      proofPortfolio.clear()
     writeLine(content)
+    if (proofPortfolio != null) proofPortfolio.markExternal()
     readSuccess()
   }
 
@@ -234,7 +263,10 @@ abstract class ProverStdIO(uniqueId: String,
 //      }
 //    })
 
+    val inverse = if (proofPortfolio != null && proofPortfolio.enabled)
+      InjectivityProofPortfolio.recognize(term, termConverter) else None
     assume(termConverter.convert(term))
+    inverse.foreach(inv => proofPortfolio.register(inv))
   }
 
   def assume(term: String): Unit = {
@@ -244,8 +276,13 @@ abstract class ProverStdIO(uniqueId: String,
     readSuccess()
   }
 
-  def assert(goal: Term, timeout: Option[Int] = None): Boolean =
-    assert(termConverter.convert(goal), timeout)
+  def assert(goal: Term, timeout: Option[Int] = None): Boolean = {
+    portfolioGoal = proofPortfolio != null && proofPortfolio.eligible &&
+      Verifier.config.assertionMode() == Config.AssertionMode.PushPop && timeout.getOrElse(Verifier.config.proverTimeout) == 0 && InjectivityProofPortfolio.eligibleGoal(goal) &&
+      proofPortfolio.ready(termConverter.convert(goal), termConverter)
+    try assert(termConverter.convert(goal), timeout)
+    finally portfolioGoal = false
+  }
 
   def assert(goal: String, timeout: Option[Int]): Boolean = {
 //    bookkeeper.assertionCounter += 1
@@ -262,6 +299,11 @@ abstract class ProverStdIO(uniqueId: String,
   }
 
   protected def assertUsingPushPop(goal: String, timeout: Option[Int]): (Boolean, Long) = {
+    if (portfolioGoal) {
+      val start = System.currentTimeMillis()
+      val proved = probe(goal)
+      if (proved.isDefined) return (proved.get, System.currentTimeMillis() - start)
+    }
     push()
     setTimeout(timeout)
 
@@ -282,6 +324,140 @@ abstract class ProverStdIO(uniqueId: String,
 
     (result, endTime - startTime)
   }
+
+  /* Attempts `goal` under a 10ms wall budget with an unlimited resource budget, independently of the
+   * timeout mode. The physical budgets are read from the prover because the cached `lastTimeout` does not
+   * determine them, and are restored verbatim together with the scope depth and the cache before a result
+   * is accepted or the caller falls back. Any failure or interruption poisons the channel: the original
+   * exception propagates, and neither restoration nor fallback is attempted on an uncertain channel. */
+  private def probe(goal: String): Option[Boolean] = {
+    def reply(): String = {
+      val line = readLine()
+      if (Thread.currentThread().isInterrupted) throw new InterruptedException()
+      line
+    }
+    def exchange(cmd: String): Unit = {
+      writeLine(cmd)
+      val answer = reply()
+      if (answer != "success")
+        throw ProverInteractionFailed(uniqueId, s"Unexpected output of prover. Expected 'success' but found: $answer")
+    }
+    val savedTimeout = lastTimeout
+    val savedDepth = pushPopScopeDepth
+    portfolioPaused = true
+    try {
+      // `unsupported` is not answered: Z3 reports it with an additional diagnostic line on the merged stream.
+      val budgets = Seq("timeout", "rlimit").map { option =>
+        writeLine(s"(get-option :$option)")
+        val value = reply()
+        val parsed = if (value.matches("0|[1-9][0-9]{0,9}")) value.toLong else -1L
+        if (parsed < 0 || parsed > 0xFFFFFFFFL)
+          throw ProverInteractionFailed(uniqueId, s"Unexpected value of option $option: $value")
+        option -> parsed
+      }
+      pushPopScopeDepth = savedDepth + 1
+      exchange(s"(push) ; ${savedDepth + 1}")
+      exchange("(set-option :rlimit 0)")
+      exchange("(set-option :timeout 10)")
+      exchange(s"(assert (not $goal))")
+      writeLine("(check-sat)")
+      val result = reply() match {
+        case "unsat" => Some(true)
+        case "sat" =>
+          // Model/debug configurations are excluded from portfolio eligibility.
+          if (Verifier.config.counterexample.toOption.isDefined || debugMode)
+            throw ProverInteractionFailed(uniqueId, "Ineligible probe diagnostics")
+          if (Verifier.config.reportReasonUnknown()) {
+            writeLine("(get-info :reason-unknown)")
+            val reason = reply()
+            if (!reason.matches("""\(:reason-unknown "(?:[^"]|"")*"\)"""))
+              throw ProverInteractionFailed(uniqueId, s"Unexpected probe diagnostic: $reason")
+            lastReasonUnknown = reason.substring(18, reason.length - 2)
+          }
+          Some(false)
+        case "unknown" => None
+        case other => throw ProverInteractionFailed(uniqueId, s"Unexpected probe output: $other")
+      }
+      exchange(s"(pop) ; ${savedDepth + 1}")
+      pushPopScopeDepth = savedDepth
+      budgets.foreach { case (option, value) => exchange(s"(set-option :$option $value)") }
+      lastTimeout = savedTimeout
+      val proved = result.orElse(if (proofPortfolio.prove(goal, proverPath.toString)) Some(true) else None)
+      if (Thread.currentThread().isInterrupted) throw new InterruptedException()
+      proved
+    } catch {
+      case failure: Throwable =>
+        try poison(failure) catch { case cleanup: Throwable => cleanupFailed(cleanup) }
+        throw failure
+    } finally portfolioPaused = false
+  }
+
+  private def usable(): Unit =
+    if (poisoned != null)
+      throw ProverInteractionFailed(uniqueId, s"Prover channel is unusable after a failed exchange: $poisoned")
+
+  private def poison(failure: Throwable): Unit = if (poisoned == null) {
+    poisoned = failure
+    if (proofPortfolio != null) proofPortfolio.clear()
+    disposePoisoned()
+  }
+
+  protected def attachCleanupFailure(failure: Throwable, cleanup: Throwable): Unit = failure.addSuppressed(cleanup)
+  private def cleanupFailed(cleanup: Throwable): Unit = {
+    def warn(): Unit = try { reporter report InternalWarningMessage(s"Incomplete prover disposal: $cleanup") } catch { case _: Throwable => () }
+    try { if (cleanup ne poisoned) attachCleanupFailure(poisoned, cleanup)
+      if (!poisoned.getSuppressed.contains(cleanup)) warn()
+    } catch { case _: Throwable => warn() }
+  }
+  protected def disposalThread(action: Runnable): Thread = new Thread(action, s"prover-$uniqueId-disposal")
+
+  /* Reaping waits at most one second; stream closure runs on a daemon. Incomplete cleanup is retried by
+   * stop(), without permitting protocol reuse. Failure attachment itself must not escape cleanup. */
+  private def disposePoisoned(): Unit = if (poisonDisposing.compareAndSet(false, true)) try {
+    val process = prover
+    if (!processDisposed) {
+      var interrupted = Thread.interrupted()
+      try {
+        if (process != null) process.destroyForcibly()
+        val until = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
+        while (process != null && process.isAlive && System.nanoTime() < until)
+          try process.waitFor(until - System.nanoTime(), TimeUnit.NANOSECONDS)
+          catch { case _: InterruptedException => interrupted = true }
+        if (process != null && process.isAlive) {
+          val msg = s"Prover $uniqueId was not reaped after a failed exchange"
+          reporter report InternalWarningMessage(msg)
+          logger warn msg
+        } else {
+          if (proverShutdownHook != null) {
+            Runtime.getRuntime.removeShutdownHook(proverShutdownHook)
+            proverShutdownHook = null
+          }
+          processDisposed = true
+        }
+      } catch {
+        case cleanup: Throwable => cleanupFailed(cleanup)
+      } finally if (interrupted) Thread.currentThread().interrupt()
+    }
+    if (!streamsDisposed && streamsClosing.compareAndSet(false, true)) try {
+      val raw = if (process == null) Seq.empty else Seq(process.getInputStream, process.getOutputStream, process.getErrorStream)
+      val streams = (raw ++ Seq[Closeable](logfileWriter, input, output)).filter(_ != null)
+      val closer = disposalThread(() => {
+        try {
+          var complete = true
+          streams.foreach { stream =>
+            try stream.close() catch { case cleanup: Throwable => complete = false; cleanupFailed(cleanup) }
+          }
+          streamsDisposed = complete
+        } catch { case cleanup: Throwable => cleanupFailed(cleanup) }
+        finally streamsClosing.set(false)
+      })
+      closer.setDaemon(true)
+      closer.start()
+    } catch { case cleanup: Throwable => streamsClosing.set(false); cleanupFailed(cleanup) }
+    allDecls = Seq()
+    allEmits = Seq()
+    preambleAssumptions = Seq()
+  } finally poisonDisposing.set(false)
 
   def saturate(data: Option[Config.ProverStateSaturationTimeout]): Unit = {
     data match {
@@ -404,6 +580,7 @@ abstract class ProverStdIO(uniqueId: String,
     val decl = FunctionDecl(fun)
 
     emit(termConverter.convert(decl))
+    if (proofPortfolio != null && argSorts.isEmpty) proofPortfolio.global(Var(id, resultSort, false))
 
     fun
   }
@@ -413,6 +590,10 @@ abstract class ProverStdIO(uniqueId: String,
     if (debugMode)
       allDecls = allDecls :+ decl
     emit(str)
+    if (proofPortfolio != null) decl match {
+      case FunctionDecl(v: Var) => proofPortfolio.global(v)
+      case _ => ()
+    }
   }
 
 //  def resetAssertionCounter() { bookkeeper.assertionCounter = 0 }
@@ -506,6 +687,8 @@ abstract class ProverStdIO(uniqueId: String,
   }
 
   protected def writeLine(out: String): Unit = {
+    usable()
+    if (proofPortfolio != null && !portfolioPaused) proofPortfolio.record(out)
     logToFile(out)
     output.println(out)
   }
