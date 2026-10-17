@@ -6,21 +6,49 @@
 
 package viper.silicon.tests
 
-import org.scalatest.ConfigMap
+import org.scalatest.{BeforeAndAfterAllConfigMap, ConfigMap, Suite}
+import viper.silver.testing.{AbstractOutput, AnnotatedTestInput, SystemUnderTest}
 
-/** Runs the full field alias fixtures with silicon.skipDisjointFullFieldAliases set for this suite. */
-class SiliconTestsSkipDisjointFullFieldAliases extends SiliconTests {
+private[tests] trait FullFieldPropertyScope extends BeforeAndAfterAllConfigMap { this: Suite =>
   private val property = "silicon.skipDisjointFullFieldAliases"
-
-  override val testDirectories: Seq[String] = Seq("skipDisjointFullFieldAliases")
-
-  override def beforeAll(configMap: ConfigMap): Unit = {
-    System.setProperty(property, "true")
-    super.beforeAll(configMap)
+  private var previous: Option[String] = None
+  private var active = false
+  private def restore(): Unit = if (active) {
+    previous match {
+      case Some(value) => System.setProperty(property, value)
+      case None => System.clearProperty(property)
+    }
+    active = false
   }
-
-  override def afterAll(configMap: ConfigMap): Unit = {
+  abstract override def beforeAll(configMap: ConfigMap): Unit = {
+    previous = Option(System.getProperty(property))
+    active = true
+    try {
+      System.setProperty(property, configMap.getOrElse("fullFieldAliases", "true").toString)
+      super.beforeAll(configMap)
+    } catch { case t: Throwable => restore(); throw t }
+  }
+  abstract override def afterAll(configMap: ConfigMap): Unit = {
     try super.afterAll(configMap)
-    finally System.clearProperty(property)
+    finally restore()
+  }
+}
+
+class SiliconTestsSkipDisjointFullFieldAliases extends SiliconTests with FullFieldPropertyScope {
+  override val testDirectories: Seq[String] = Seq("skipDisjointFullFieldAliases")
+  override def systemsUnderTest: Seq[SystemUnderTest] = super.systemsUnderTest.map { system =>
+    new SystemUnderTest {
+      val projectInfo = system.projectInfo
+      def run(input: AnnotatedTestInput): Seq[AbstractOutput] = {
+        val outputs = system.run(input)
+        outputs.foreach(output => println(s"full-field raw: $output"))
+        outputs
+      }
+    }
+  }
+  override def beforeAll(configMap: ConfigMap): Unit = {
+    super.beforeAll(configMap)
+    println(s"full-field effective: property=${System.getProperty("silicon.skipDisjointFullFieldAliases")}, " +
+      s"moreJoins=${silicon.config.moreJoins()}, exhaleMode=${silicon.config.exhaleMode}")
   }
 }

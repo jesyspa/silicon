@@ -70,6 +70,31 @@ method branchNoLeak(x: Ref, y: Ref, b: Bool) {
   assert x != y
 }
 
+method guardedAdmissionFeasible(x: Ref, y: Ref, b: Bool) {
+  inhale acc(y.f)
+  if (b) {
+    inhale acc(x.f)
+    //:: ExpectedOutput(assert.failed:assertion.false)
+    assert false
+  }
+}
+
+method implicationNoLeak(x: Ref, y: Ref, b: Bool) {
+  inhale acc(x.f)
+  inhale b ==> acc(y.f)
+  exhale acc(x.f)
+  //:: ExpectedOutput(assert.failed:assertion.false)
+  assert x != y
+}
+
+method conditionalNoLeak(x: Ref, y: Ref, b: Bool) {
+  inhale acc(x.f)
+  inhale b ? acc(y.f) : true
+  exhale acc(x.f)
+  //:: ExpectedOutput(assert.failed:assertion.false)
+  assert x != y
+}
+
 method halves(x: Ref, y: Ref) {
   inhale acc(x.f, 1/2)
   inhale acc(y.f, 1/2)
