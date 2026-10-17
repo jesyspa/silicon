@@ -17,7 +17,7 @@ import viper.silicon.state._
 import viper.silicon.state.terms.{Trigger, _}
 import viper.silicon.state.terms.perms._
 import viper.silicon.state.terms.predef.`?r`
-import viper.silicon.supporters.functions.FunctionRecorder
+import viper.silicon.supporters.functions.{FunctionRecorder, NoopFunctionRecorder}
 import viper.silicon.verifier.Verifier
 import viper.silver.ast
 import viper.silver.ast.Exp
@@ -30,7 +30,10 @@ trait StateConsolidationRules extends SymbolicExecutionRules {
   def consolidate(s: State, v: Verifier): State
   def consolidateOptionally(s: State, v: Verifier): State
   def merge(fr: FunctionRecorder, s: State, h: Heap, newH: Heap, v: Verifier): (FunctionRecorder, Heap)
-  def merge(fr: FunctionRecorder, s: State, h: Heap, ch: NonQuantifiedChunk, v: Verifier): (FunctionRecorder, Heap)
+  def merge(fr: FunctionRecorder, s: State, h: Heap, ch: NonQuantifiedChunk, v: Verifier): (FunctionRecorder, Heap) =
+    merge(fr, s, h, ch, v, false)
+  /** `fromInhale` is true only for chunks produced directly by an `inhale` statement. */
+  def merge(fr: FunctionRecorder, s: State, h: Heap, ch: NonQuantifiedChunk, v: Verifier, fromInhale: Boolean): (FunctionRecorder, Heap)
 
   protected def assumeUpperPermissionBoundForQPFields(s: State, v: Verifier): State
   protected def assumeUpperPermissionBoundForQPFields(s: State, heaps: Seq[Heap], v: Verifier): State
@@ -48,7 +51,7 @@ class MinimalStateConsolidator extends StateConsolidationRules {
   def merge(fr: FunctionRecorder, s: State, h: Heap, newH: Heap, v: Verifier): (FunctionRecorder, Heap) =
     (fr, Heap(h.values ++ newH.values))
 
-  def merge(fr: FunctionRecorder, s: State, h: Heap, ch: NonQuantifiedChunk, v: Verifier): (FunctionRecorder, Heap) =
+  def merge(fr: FunctionRecorder, s: State, h: Heap, ch: NonQuantifiedChunk, v: Verifier, fromInhale: Boolean): (FunctionRecorder, Heap) =
     (fr, h + ch)
 
   protected def assumeUpperPermissionBoundForQPFields(s: State, @unused v: Verifier): State = s
@@ -142,14 +145,16 @@ class DefaultStateConsolidator(protected val config: Config) extends StateConsol
     if (s.retrying) consolidate(s, v)
     else s
 
-  def merge(fr: FunctionRecorder, s: State, h: Heap, ch: NonQuantifiedChunk, v: Verifier): (FunctionRecorder, Heap) = {
-    merge(fr, s, h, Heap(Seq(ch)), v)
-  }
+  def merge(fr: FunctionRecorder, s: State, h: Heap, ch: NonQuantifiedChunk, v: Verifier, fromInhale: Boolean): (FunctionRecorder, Heap) =
+    mergeHeap(fr, s, h, Heap(Seq(ch)), v, fromInhale)
 
-  def merge(fr1: FunctionRecorder, s: State, h: Heap, newH: Heap, v: Verifier): (FunctionRecorder, Heap) = {
+  def merge(fr1: FunctionRecorder, s: State, h: Heap, newH: Heap, v: Verifier): (FunctionRecorder, Heap) =
+    mergeHeap(fr1, s, h, newH, v, false)
+
+  private def mergeHeap(fr1: FunctionRecorder, s: State, h: Heap, newH: Heap, v: Verifier, fromInhale: Boolean): (FunctionRecorder, Heap) = {
     val mergeLog = new CommentRecord("Merge", null, v.decider.pcs)
     val sepIdentifier = v.symbExLog.openScope(mergeLog)
-    val (fr2, mergedChunks, newlyAddedChunks, snapEqs) = singleMerge(fr1, s, h.values.toSeq, newH.values.toSeq, (s.functionRecorderQuantifiedVariables() ++ s.packagingWandSnapshots).map(_._1), v)
+    val (fr2, mergedChunks, newlyAddedChunks, snapEqs) = singleMerge(fr1, s, h.values.toSeq, newH.values.toSeq, (s.functionRecorderQuantifiedVariables() ++ s.packagingWandSnapshots).map(_._1), v, fromInhale)
 
     v.decider.assume(snapEqs, Option.when(debugOn)(DebugExp.createInstance("Snapshot", isInternal_ = true)), enforceAssumption = false)
 
@@ -169,7 +174,8 @@ class DefaultStateConsolidator(protected val config: Config) extends StateConsol
                           destChunks: Seq[Chunk],
                           newChunks: Seq[Chunk],
                           qvars: Seq[Var],
-                          v: Verifier)
+                          v: Verifier,
+                          fromInhale: Boolean = false)
                          : (FunctionRecorder,
                             Seq[Chunk],
                             Seq[Chunk],
@@ -189,7 +195,7 @@ class DefaultStateConsolidator(protected val config: Config) extends StateConsol
        *           sequence of destination chunks
        */
 
-      findMatchingChunk(accMergedChunks, nextChunk, v) match {
+      findMatchingChunk(accMergedChunks, nextChunk, v, s, fromInhale) match {
         case Some(ch) =>
           mergeChunks(fr1, s, ch, nextChunk, qvars, v) match {
             case Some((fr2, newChunk, snapEq)) =>
@@ -205,14 +211,36 @@ class DefaultStateConsolidator(protected val config: Config) extends StateConsol
     result
   }
 
-  private def findMatchingChunk(chunks: Iterable[Chunk], chunk: Chunk, v: Verifier): Option[Chunk] = {
+  private def findMatchingChunk(chunks: Iterable[Chunk], chunk: Chunk, v: Verifier, s: State, fromInhale: Boolean): Option[Chunk] = {
     chunk match {
+      case chunk: BasicChunk if fromInhale && isFullField(chunk) && mayAssumeDisjointFullFields(s) =>
+        val relevantChunks = chunkSupporter.findChunksWithID[BasicChunk](chunks, chunk.id)
+        relevantChunks.find(_.args == chunk.args) orElse {
+          /* An inhaled full field permission cannot alias a full permission to the same field that
+           * is already held (cf. FieldDescription.permUpperBoundDiseq), so the receivers differ.
+           * Once that is assumed, an alias check against such a chunk can only succeed on an
+           * infeasible path, so it is skipped.
+           */
+          val (disjointChunks, otherChunks) = relevantChunks.partition(isFullField)
+          disjointChunks.foreach(ch =>
+            v.decider.assume(Not(ch.args.head === chunk.args.head),
+              Option.when(debugOn)(DebugExp.createInstance("Full field permissions have distinct receivers", isInternal_ = true))))
+          chunkSupporter.findChunk[BasicChunk](otherChunks, chunk.id, chunk.args, v)
+        }
       case chunk: BasicChunk =>
         chunkSupporter.findChunk[BasicChunk](chunks, chunk.id, chunk.args, v)
       case chunk: QuantifiedChunk => quantifiedChunkSupporter.findChunk(chunks, chunk, v)
       case _ => None
     }
   }
+
+  private def isFullField(ch: BasicChunk): Boolean =
+    ch.resourceID == FieldID && ch.args.size == 1 && ch.perm == FullPerm
+
+  private def mayAssumeDisjointFullFields(s: State): Boolean =
+    !s.retrying && s.mayAssumeUpperBounds && !s.isInPackage && !s.exhaleExt && !s.assertReadAccessOnly &&
+      s.functionRecorder == NoopFunctionRecorder && s.permissionScalingFactor == FullPerm &&
+      java.lang.Boolean.getBoolean("silicon.skipDisjointFullFieldAliases")
 
   // Merges two chunks that are aliases (i.e. that have the same id and the args are proven to be equal)
   // and returns the merged chunk or None, if the chunks could not be merged
@@ -479,7 +507,7 @@ class MinimalRetryingStateConsolidator(config: Config) extends RetryingStateCons
   override def merge(fr: FunctionRecorder, s: State, h: Heap, newH: Heap, v: Verifier): (FunctionRecorder, Heap) =
     (fr, Heap(h.values ++ newH.values))
 
-  override def merge(fr: FunctionRecorder, s: State, h: Heap, ch: NonQuantifiedChunk, v: Verifier): (FunctionRecorder, Heap) =
+  override def merge(fr: FunctionRecorder, s: State, h: Heap, ch: NonQuantifiedChunk, v: Verifier, fromInhale: Boolean): (FunctionRecorder, Heap) =
     (fr, h + ch)
 
   override protected def assumeUpperPermissionBoundForQPFields(s: State, @unused v: Verifier): State = s
@@ -515,7 +543,7 @@ class MoreComplexExhaleStateConsolidator(config: Config) extends DefaultStateCon
 }
 
 class MaskHeapStateConsolidator extends MinimalStateConsolidator {
-  override def merge(fr: FunctionRecorder, s: State, h: Heap, ch: NonQuantifiedChunk, v: Verifier): (FunctionRecorder, Heap) = ???
+  override def merge(fr: FunctionRecorder, s: State, h: Heap, ch: NonQuantifiedChunk, v: Verifier, fromInhale: Boolean): (FunctionRecorder, Heap) = ???
 
   override def merge(fr: FunctionRecorder, s: State, h: Heap, newH: Heap, v: Verifier): (FunctionRecorder, Heap) = {
     (fr, maskHeapSupporter.mergeWandHeaps(h, newH, v, Some(s)))

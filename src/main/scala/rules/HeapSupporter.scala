@@ -185,6 +185,12 @@ trait HeapSupportRules extends SymbolicExecutionRules {
                     pve: PartialVerificationError,
                     mergeAndTrigger: Boolean,
                     v: Verifier)
+                   (Q: (State, Verifier) => VerificationResult): VerificationResult =
+    produceSingle(s, resource, tArgs, eArgs, tSnap, eSnap, tPerm, ePerm, pve, mergeAndTrigger, v, false)(Q)
+
+  def produceSingle(s: State, resource: ast.Resource, tArgs: Seq[Term], eArgs: Option[Seq[ast.Exp]],
+                    tSnap: Term, eSnap: Option[ast.Exp], tPerm: Term, ePerm: Option[ast.Exp],
+                    pve: PartialVerificationError, mergeAndTrigger: Boolean, v: Verifier, fromInhale: Boolean)
                    (Q: (State, Verifier) => VerificationResult): VerificationResult
 
   def produceQuantified(s: State,
@@ -559,7 +565,8 @@ class DefaultHeapSupportRules extends HeapSupportRules {
                     ePerm: Option[ast.Exp],
                     pve: PartialVerificationError,
                     mergeAndTrigger: Boolean,
-                    v: Verifier)
+                    v: Verifier,
+                    fromInhale: Boolean)
                    (Q: (State, Verifier) => VerificationResult) : VerificationResult = {
     val useQPs = s.isQuantifiedResource(resource)
     if (useQPs) {
@@ -579,7 +586,7 @@ class DefaultHeapSupportRules extends HeapSupportRules {
           val (resId, snap1) = if (resource.isInstanceOf[ast.Field]) (FieldID, tSnap) else (PredicateID, tSnap.convert(sorts.Snap))
           val ch = BasicChunk(resId, chunkId.asInstanceOf[BasicChunkIdentifier], tArgs, eArgs, snap1, eSnap, tPerm, ePerm, s.qpTag)
           if (mergeAndTrigger) {
-            chunkSupporter.produce(s, s.h, ch, v)((s2, h2, v2) => {
+            chunkSupporter.produce(s, s.h, ch, v, fromInhale)((s2, h2, v2) => {
               if (resource.isInstanceOf[ast.Predicate] && Verifier.config.enablePredicateTriggersOnInhale() && s2.functionRecorder == NoopFunctionRecorder
                 && !Verifier.config.disableFunctionUnfoldTrigger()) {
                 val predicate = resource.asInstanceOf[ast.Predicate]

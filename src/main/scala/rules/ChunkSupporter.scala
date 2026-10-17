@@ -38,7 +38,10 @@ trait ChunkSupportRules extends SymbolicExecutionRules {
 
   def produce(s: State, h: Heap, ch: NonQuantifiedChunk, v: Verifier)
              (Q: (State, Heap, Verifier) => VerificationResult)
-             : VerificationResult
+             : VerificationResult = produce(s, h, ch, v, false)(Q)
+
+  def produce(s: State, h: Heap, ch: NonQuantifiedChunk, v: Verifier, fromInhale: Boolean)
+             (Q: (State, Heap, Verifier) => VerificationResult): VerificationResult
 
   def lookup(s: State,
              h: Heap,
@@ -211,13 +214,13 @@ object chunkSupporter extends ChunkSupportRules {
     }
   }
 
-  def produce(s: State, h: Heap, ch: NonQuantifiedChunk, v: Verifier)
+  def produce(s: State, h: Heap, ch: NonQuantifiedChunk, v: Verifier, fromInhale: Boolean)
              (Q: (State, Heap, Verifier) => VerificationResult)
              : VerificationResult = {
 
     // Try to merge the chunk into the heap by finding an alias.
     // In any case, property assumptions are added after the merge step.
-    val (fr1, h1) = v.stateConsolidator(s).merge(s.functionRecorder, s, h, ch, v)
+    val (fr1, h1) = v.stateConsolidator(s).merge(s.functionRecorder, s, h, ch, v, fromInhale)
     Q(s.copy(functionRecorder = fr1), h1, v)
   }
 

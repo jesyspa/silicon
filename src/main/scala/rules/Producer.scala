@@ -39,7 +39,11 @@ trait ProductionRules extends SymbolicExecutionRules {
               pve: PartialVerificationError,
               v: Verifier)
              (Q: (State, Verifier) => VerificationResult)
-             : VerificationResult
+             : VerificationResult = produce(s, sf, a, pve, v, false)(Q)
+
+  def produce(s: State, sf: (Sort, Verifier) => Term, a: ast.Exp,
+              pve: PartialVerificationError, v: Verifier, fromInhale: Boolean)
+             (Q: (State, Verifier) => VerificationResult): VerificationResult
 
   /** Subsequently produces assertions `as` into state `s`.
     *
@@ -99,13 +103,14 @@ object producer extends ProductionRules {
               sf: (Sort, Verifier) => Term,
               a: ast.Exp,
               pve: PartialVerificationError,
-              v: Verifier)
+              v: Verifier,
+              fromInhale: Boolean)
              (Q: (State, Verifier) => VerificationResult)
              : VerificationResult =
 
   {
     val aWhenInhaling = a.whenInhaling
-    produceR(s, v.snapshotSupporter.adaptProduceSnapshotFunction(s, sf, aWhenInhaling.topLevelConjuncts, v), aWhenInhaling, pve, v)(Q)
+    produceR(s, v.snapshotSupporter.adaptProduceSnapshotFunction(s, sf, aWhenInhaling.topLevelConjuncts, v), aWhenInhaling, pve, v, fromInhale)(Q)
   }
 
   /** @inheritdoc */
@@ -129,14 +134,15 @@ object producer extends ProductionRules {
     })
 
     val tlcsResult = allTlcs.result()
-    produceTlcs(s, v.snapshotSupporter.adaptProduceSnapshotFunction(s, sf, tlcsResult, v), tlcsResult, allPves.result(), v)(Q)
+    produceTlcs(s, v.snapshotSupporter.adaptProduceSnapshotFunction(s, sf, tlcsResult, v), tlcsResult, allPves.result(), v, false)(Q)
   }
 
   private def produceTlcs(s: State,
                           sf: (Sort, Verifier) => Term,
                           as: Seq[ast.Exp],
                           pves: Seq[PartialVerificationError],
-                          v: Verifier)
+                          v: Verifier,
+                          fromInhale: Boolean)
                          (Q: (State, Verifier) => VerificationResult)
                          : VerificationResult = {
 
@@ -147,7 +153,7 @@ object producer extends ProductionRules {
       val pve = pves.head
 
       if (as.tail.isEmpty)
-        wrappedProduceTlc(s, sf, a, pve, v)(Q)
+        wrappedProduceTlc(s, sf, a, pve, v, fromInhale)(Q)
       else {
         try {
           val (sf0, sf1) =
@@ -158,8 +164,8 @@ object producer extends ProductionRules {
            *       over and over again.
            */
 
-          wrappedProduceTlc(s, sf0, a, pve, v)((s1, v1) =>
-            produceTlcs(s1, sf1, as.tail, pves.tail, v1)(Q))
+          wrappedProduceTlc(s, sf0, a, pve, v, fromInhale)((s1, v1) =>
+            produceTlcs(s1, sf1, as.tail, pves.tail, v1, fromInhale)(Q))
         } catch {
           // We will get an IllegalArgumentException from createSnapshotPair if sf(...) returns Unit.
           // This should never happen if we're in a reachable state, so here we check for that
@@ -176,14 +182,15 @@ object producer extends ProductionRules {
                        sf: (Sort, Verifier) => Term,
                        a: ast.Exp,
                        pve: PartialVerificationError,
-                       v: Verifier)
+                       v: Verifier,
+                       fromInhale: Boolean)
                       (Q: (State, Verifier) => VerificationResult)
                       : VerificationResult = {
 
     val tlcs = a.topLevelConjuncts
     val pves = Seq.fill(tlcs.length)(pve)
 
-    produceTlcs(s, sf, tlcs, pves, v)(Q)
+    produceTlcs(s, sf, tlcs, pves, v, fromInhale)(Q)
   }
 
   /** Wrapper/decorator for consume that injects the following operations:
@@ -193,12 +200,13 @@ object producer extends ProductionRules {
                                 sf: (Sort, Verifier) => Term,
                                 a: ast.Exp,
                                 pve: PartialVerificationError,
-                                v: Verifier)
+                                v: Verifier,
+                                fromInhale: Boolean)
                                (Q: (State, Verifier) => VerificationResult)
                                : VerificationResult = {
 
     val sepIdentifier = v.symbExLog.openScope(new ProduceRecord(a, s, v.decider.pcs))
-    produceTlc(s, sf, a, pve, v)((s1, v1) => {
+    produceTlc(s, sf, a, pve, v, fromInhale)((s1, v1) => {
       v1.symbExLog.closeScope(sepIdentifier)
       Q(s1, v1)})
   }
@@ -207,7 +215,8 @@ object producer extends ProductionRules {
                          sf: (Sort, Verifier) => Term,
                          a: ast.Exp,
                          pve: PartialVerificationError,
-                         v: Verifier)
+                         v: Verifier,
+                         fromInhale: Boolean)
                         (continuation: (State, Verifier) => VerificationResult)
                         : VerificationResult = {
 
@@ -226,7 +235,7 @@ object producer extends ProductionRules {
           // The type arguments here are Null because there is no need to pass any join data.
           joiner.join[scala.Null, scala.Null](s1, v1, resetState = false)((s1, v1, QB) =>
             branch(s1.copy(parallelizeBranches = false), t0, (e0, e0New), v1)(
-              (s2, v2) => produceR(s2.copy(parallelizeBranches = s1.parallelizeBranches), sf, a0, pve, v2)((s3, v3) => {
+              (s2, v2) => produceR(s2.copy(parallelizeBranches = s1.parallelizeBranches), sf, a0, pve, v2, fromInhale)((s3, v3) => {
                 v3.symbExLog.closeScope(uidImplies)
                 QB(s3, null, v3)
               }),
@@ -258,7 +267,7 @@ object producer extends ProductionRules {
 
         eval(s, e0, pve, v)((s1, t0, e0New, v1) =>
           branch(s1, t0, (e0, e0New), v1)(
-            (s2, v2) => produceR(s2, sf, a0, pve, v2)((s3, v3) => {
+            (s2, v2) => produceR(s2, sf, a0, pve, v2, fromInhale)((s3, v3) => {
               v3.symbExLog.closeScope(uidImplies)
               Q(s3, v3)
             }),
@@ -281,11 +290,11 @@ object producer extends ProductionRules {
           // The type arguments here are Null because there is no need to pass any join data.
           joiner.join[scala.Null, scala.Null](s1, v1, resetState = false)((s1, v1, QB) =>
             branch(s1.copy(parallelizeBranches = false), t0, (e0, e0New), v1)(
-              (s2, v2) => produceR(s2.copy(parallelizeBranches = s1.parallelizeBranches), sf, a1, pve, v2)((s3, v3) => {
+              (s2, v2) => produceR(s2.copy(parallelizeBranches = s1.parallelizeBranches), sf, a1, pve, v2, fromInhale)((s3, v3) => {
                 v3.symbExLog.closeScope(uidCondExp)
                 QB(s3, null, v3)
               }),
-              (s2, v2) => produceR(s2.copy(parallelizeBranches = s1.parallelizeBranches), sf, a2, pve, v2)((s3, v3) => {
+              (s2, v2) => produceR(s2.copy(parallelizeBranches = s1.parallelizeBranches), sf, a2, pve, v2, fromInhale)((s3, v3) => {
                 v3.symbExLog.closeScope(uidCondExp)
                 QB(s3, null, v3)
               }))
@@ -307,18 +316,18 @@ object producer extends ProductionRules {
 
         eval(s, e0, pve, v)((s1, t0, e0New, v1) =>
           branch(s1, t0, (e0, e0New), v1)(
-            (s2, v2) => produceR(s2, sf, a1, pve, v2)((s3, v3) => {
+            (s2, v2) => produceR(s2, sf, a1, pve, v2, fromInhale)((s3, v3) => {
               v3.symbExLog.closeScope(uidCondExp)
               Q(s3, v3)
             }),
-            (s2, v2) => produceR(s2, sf, a2, pve, v2)((s3, v3) => {
+            (s2, v2) => produceR(s2, sf, a2, pve, v2, fromInhale)((s3, v3) => {
               v3.symbExLog.closeScope(uidCondExp)
               Q(s3, v3)
             })))
 
       case let: ast.Let if !let.isPure =>
         letSupporter.handle[ast.Exp](s, let, pve, v)((s1, g1, body, v1) =>
-          produceR(s1.copy(g = s1.g + g1), sf, body, pve, v1)(Q))
+          produceR(s1.copy(g = s1.g + g1), sf, body, pve, v1, fromInhale)(Q))
 
       case accPred: ast.AccessPredicate =>
         val eArgs = accPred.loc.args(s.program)
@@ -336,7 +345,7 @@ object producer extends ProductionRules {
               else
                 WildcardSimplifyingPermTimes(tPerm, s2.permissionScalingFactor)
               val gainExp = ePermNew.map(p => ast.PermMul(p, s2.permissionScalingFactorExp.get)(p.pos, p.info, p.errT))
-              v2.heapSupporter.produceSingle(s2, resource, tArgs, eArgsNew, snap, None, gain, gainExp, pve, true, v2)(Q)
+              v2.heapSupporter.produceSingle(s2, resource, tArgs, eArgsNew, snap, None, gain, gainExp, pve, true, v2, fromInhale)(Q)
             })))
 
 

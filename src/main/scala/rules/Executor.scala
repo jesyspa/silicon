@@ -483,7 +483,7 @@ object executor extends ExecutionRules {
           Success()
         case _ =>
           val s0 = if (debugOn) v.startKeyHeap(s, oldLabel, ExecStmt(inhale)) else s
-          produce(s0, freshSnap, a, InhaleFailed(inhale), v)((s1, v1) => {
+          produce(s0, freshSnap, a, InhaleFailed(inhale), v, fromInhale = true)((s1, v1) => {
             v1.decider.prover.saturate(Verifier.config.proverSaturationTimeouts.afterInhale)
             val s1a = if (debugOn) v.finishKeyHeap(s1) else s1
             Q(s1a, v1)})

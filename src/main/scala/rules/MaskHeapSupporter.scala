@@ -1072,7 +1072,8 @@ object maskHeapSupporter extends SymbolicExecutionRules with StatefulComponent w
                              ePerm: Option[ast.Exp],
                              pve: PartialVerificationError,
                              mergeAndTrigger: Boolean,
-                             v: Verifier)
+                             v: Verifier,
+                             fromInhale: Boolean)
                             (Q: (State, Verifier) => VerificationResult): VerificationResult = {
     produceSingleLocation(s, resource, tArgs, tPerm, v, tSnap)(Q)
   }
