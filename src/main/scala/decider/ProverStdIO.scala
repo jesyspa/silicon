@@ -250,9 +250,11 @@ abstract class ProverStdIO(uniqueId: String,
   def assert(goal: String, timeout: Option[Int]): Boolean = {
 //    bookkeeper.assertionCounter += 1
 
-    val (result, duration) = Verifier.config.assertionMode() match {
-      case Config.AssertionMode.SoftConstraints => assertUsingSoftConstraints(goal, timeout)
-      case Config.AssertionMode.PushPop => assertUsingPushPop(goal, timeout)
+    val (result, duration) = QueryProfile.time[(Boolean, Long)]("assert", r => if (r._1) "proved" else "not-proved") {
+      Verifier.config.assertionMode() match {
+        case Config.AssertionMode.SoftConstraints => assertUsingSoftConstraints(goal, timeout)
+        case Config.AssertionMode.PushPop => assertUsingPushPop(goal, timeout)
+      }
     }
 
     comment(s"${viper.silver.reporter.format.formatMillisReadably(duration)}")
@@ -293,8 +295,10 @@ abstract class ProverStdIO(uniqueId: String,
   def saturate(timeout: Int, comment: String): Unit = {
     this.comment(s"State saturation: $comment")
     setTimeout(Some(timeout))
-    writeLine("(check-sat)")
-    readLine()
+    QueryProfile.time[String]("saturate", _ => comment) {
+      writeLine("(check-sat)")
+      readLine()
+    }
   }
 
   protected def retrieveAndSaveModel(): Unit = {
@@ -351,12 +355,14 @@ abstract class ProverStdIO(uniqueId: String,
   def check(timeout: Option[Int] = None): Result = {
     setTimeout(timeout)
 
-    writeLine("(check-sat)")
+    QueryProfile.time[Result]("check", _.toString) {
+      writeLine("(check-sat)")
 
-    readLine() match {
-      case "sat" => Sat
-      case "unsat" => Unsat
-      case "unknown" => Unknown
+      readLine() match {
+        case "sat" => Sat
+        case "unsat" => Unsat
+        case "unknown" => Unknown
+      }
     }
   }
 
