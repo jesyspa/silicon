@@ -1,0 +1,133 @@
+// Any copyright is dedicated to the Public Domain.
+// http://creativecommons.org/publicdomain/zero/1.0/
+
+field f: Int
+
+predicate P(x: Ref) { acc(x.f) }
+
+method distinct(x: Ref, y: Ref) {
+  inhale acc(x.f)
+  inhale acc(y.f)
+  assert x != y
+}
+
+// Feature-only proof: the receiver disequality outlives the consumed permission.
+method factsAfterConsumption(x: Ref, y: Ref) {
+  inhale acc(x.f)
+  inhale acc(y.f)
+  exhale acc(x.f)
+  assert x != y
+}
+
+method knownAlias(x: Ref, y: Ref) {
+  inhale x == y
+  inhale acc(x.f)
+  inhale acc(y.f)
+  assert false
+}
+
+@stateConsolidationMode("default")
+method consumeInconsistent(x: Ref, y: Ref) {
+  inhale x == y
+  inhale acc(x.f) && x.f == 1
+  inhale acc(y.f) && y.f == 2
+  exhale acc(x.f)
+  exhale acc(y.f)
+  exhale acc(x.f, 2/1)
+  x.f := 3
+  assert y.f == 4
+}
+
+@stateConsolidationMode("retrying")
+method consumeInconsistentRetrying(x: Ref, y: Ref) {
+  inhale x == y
+  inhale acc(x.f) && x.f == 1
+  inhale acc(y.f) && y.f == 2
+  exhale acc(x.f)
+  exhale acc(y.f)
+  exhale acc(x.f, 2/1)
+  x.f := 3
+  assert y.f == 4
+}
+
+@stateConsolidationMode("retrying")
+method consumeLiteralRetrying(x: Ref) {
+  inhale acc(x.f)
+  inhale acc(x.f)
+  exhale acc(x.f, 3/1)
+  x.f := 3
+  assert x.f == 4
+}
+
+method branchNoLeak(x: Ref, y: Ref, b: Bool) {
+  inhale acc(y.f)
+  if (b) {
+    inhale acc(x.f)
+    exhale acc(x.f)
+  }
+  exhale acc(y.f)
+  //:: ExpectedOutput(assert.failed:assertion.false)
+  assert x != y
+}
+
+method halves(x: Ref, y: Ref) {
+  inhale acc(x.f, 1/2)
+  inhale acc(y.f, 1/2)
+  exhale acc(x.f, 1/2)
+  //:: ExpectedOutput(assert.failed:assertion.false)
+  assert x != y
+}
+
+method fullAndHalf(x: Ref, y: Ref) {
+  inhale acc(x.f)
+  inhale acc(y.f, 1/2)
+  exhale acc(x.f)
+  //:: ExpectedOutput(assert.failed:assertion.false)
+  assert x != y
+}
+
+method symbolic(x: Ref, y: Ref, p: Perm) requires p == write {
+  inhale acc(x.f)
+  inhale acc(y.f, p)
+  exhale acc(x.f)
+  //:: ExpectedOutput(assert.failed:assertion.false)
+  assert x != y
+}
+
+method wandApply(x: Ref, y: Ref, z: Ref) {
+  inhale acc(x.f) && acc(z.f) && (acc(z.f) --* acc(y.f))
+  apply acc(z.f) --* acc(y.f)
+  exhale acc(x.f)
+  assert x != y
+}
+
+method packaging(x: Ref, y: Ref) {
+  inhale acc(x.f)
+  package acc(y.f) --* acc(y.f) && acc(x.f)
+  exhale acc(y.f) --* acc(y.f) && acc(x.f)
+  //:: ExpectedOutput(assert.failed:assertion.false)
+  assert x != y
+}
+
+method unfoldNoFact(x: Ref, y: Ref) {
+  inhale acc(y.f) && acc(P(x))
+  unfold acc(P(x))
+  exhale acc(y.f)
+  //:: ExpectedOutput(assert.failed:assertion.false)
+  assert x != y
+}
+
+// Feature-only proof: an inhaled permission is disjoint from one obtained by unfolding.
+method unfoldThenInhale(x: Ref, y: Ref) {
+  inhale acc(P(x))
+  unfold acc(P(x))
+  inhale acc(y.f)
+  exhale acc(y.f)
+  assert x != y
+}
+
+function fn(x: Ref, y: Ref): Int
+  requires acc(P(x)) && acc(y.f)
+  //:: ExpectedOutput(postcondition.violated:assertion.false)
+  ensures x != y
+{ unfolding acc(P(x)) in 0 }
