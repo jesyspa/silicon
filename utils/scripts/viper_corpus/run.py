@@ -55,6 +55,9 @@ def load_manifest(path, root):
 
 
 def outcome(measurement, log):
+    if any(measurement.get(key, {}).get('oom_kill', 0)
+           for key in ('memory_events', 'process_memory_events')):
+        return 'oom'
     if measurement.get('timed_out'):
         return 'timeout'
     if measurement.get('errors') or measurement.get('leftover_failure'):
@@ -70,7 +73,8 @@ def outcome(measurement, log):
     # Silicon also exits 1 for caught internal exceptions. Require a normal
     # verification summary to distinguish those from expected negative tests.
     if code == 1 and re.search(r'(?i)verification failed|\b[1-9][0-9]* errors? found\b|'
-                               r'the following errors? (?:was|were) found', log):
+                               r'the following errors? (?:was|were) found|'
+                               r'\bSilicon found [1-9][0-9]* errors?\b', log):
         return 'failed'
     return 'crash'
 
@@ -82,8 +86,13 @@ def run_one(row, args):
                '--cgroup-root', str(args.cgroup_root), '--java', str(args.java),
                '--jar', str(args.jar), '--z3', str(args.z3),
                '--output-directory', str(directory), '--timeout', str(args.timeout)]
+    for option in ('solver_memory_max', 'solver_swap_max'):
+        value = getattr(args, option, None)
+        if value is not None:
+            command += ['--' + option.replace('_', '-'), str(value)]
     command += ['--jvm-arg=' + token for token in args.jvm_arg]
     command += ['--verifier-arg=' + token for token in args.verifier_arg]
+    command += ['--verifier-arg=' + token for token in row.get('verifier_args', [])]
     command += [str(args.corpus_root / row['path'])]
     directory.parent.mkdir(parents=True, exist_ok=True)
     # The reused benchmark owns timeout, process-group termination, cgroups,
@@ -113,6 +122,10 @@ def execute(args, rows):
                       artifacts={name: dict(path=str(getattr(args, name)),
                                             sha256=sha256(getattr(args, name)))
                                  for name in ('java', 'jar', 'z3')})
+        for option in ('solver_memory_max', 'solver_swap_max'):
+            value = getattr(args, option, None)
+            if value is not None:
+                config[option] = value
         config_path = args.output_directory / 'run.json'
         if config_path.exists():
             if json.loads(config_path.read_text()) != config:
@@ -160,11 +173,15 @@ def main(argv=None):
     parser.add_argument('--z3', type=Path, default=Path(shutil.which('z3') or 'z3'))
     parser.add_argument('--jobs', type=int, default=6, help='parallel input jobs')
     parser.add_argument('--timeout', type=int, default=300, help='per-input wall limit in seconds')
+    parser.add_argument('--solver-memory-max', type=int, help='solver leaf memory.max in bytes')
+    parser.add_argument('--solver-swap-max', type=int, help='solver leaf memory.swap.max in bytes')
     parser.add_argument('--jvm-arg', action='append', default=[])
     parser.add_argument('--verifier-arg', action='append', default=[])
     args = parser.parse_args(argv)
     if args.jobs <= 0 or args.timeout <= 0:
         parser.error('jobs and timeout must be positive')
+    if any(v is not None and v < 0 for v in (args.solver_memory_max, args.solver_swap_max)):
+        parser.error('solver memory/swap limits must be nonnegative')
     for name in ('corpus_root', 'manifest', 'output_directory', 'cgroup_root', 'jar', 'java', 'z3'):
         setattr(args, name, getattr(args, name).resolve())
     # Reuse the benchmark's option guards and executable/cgroup validation.

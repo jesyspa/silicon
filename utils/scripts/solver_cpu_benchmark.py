@@ -31,9 +31,13 @@ def arguments(argv=None):
     p.add_argument('--verifier-arg', action='append', default=[],
                    help='one verifier argument/value; repeatable; accounting options reserved')
     p.add_argument('--smt-logs', action='store_true', help='retain SMT logs in output directory')
+    p.add_argument('--solver-memory-max', type=int, help='solver leaf memory.max in bytes')
+    p.add_argument('--solver-swap-max', type=int, help='solver leaf memory.swap.max in bytes')
     a = p.parse_args(argv)
     if a.timeout <= 0:
         p.error('--timeout must be positive')
+    if any(v is not None and v < 0 for v in (a.solver_memory_max, a.solver_swap_max)):
+        p.error('solver memory/swap limits must be nonnegative')
     for token in a.verifier_arg:
         key = token.lstrip('-').split('=', 1)[0]
         if token == '--' or token.startswith('@') or (token.startswith('-') and (
@@ -95,6 +99,13 @@ def cleanup(cgroup, record):
                                   for k in ('usage', 'user', 'system')}
     except Exception as exc:
         errors.append('CPU accounting: ' + repr(exc))
+    try:
+        events = cgroup / 'memory.events'
+        if events.exists():
+            record['memory_events'] = {k: int(v) for k, v in
+                                       (line.split() for line in events.read_text().splitlines())}
+    except Exception as exc:
+        errors.append('memory accounting: ' + repr(exc))
     try:
         cgroup.rmdir()
     except Exception as exc:
@@ -167,6 +178,26 @@ def benchmark(a):
             record['artifacts'][name] = dict(path=str(path), sha256=digest.hexdigest())
         cgroup.mkdir()
         created = True
+        # Corpus attempts live under <run>/inputs/<attempt>. This optional
+        # run-level policy permits operator limit changes between inputs.
+        policy_path = a.output_directory.parent.parent / 'solver-limits.json'
+        if a.output_directory.parent.name == 'inputs' and policy_path.exists():
+            policy = json.loads(policy_path.read_text())
+            for option in ('solver_memory_max', 'solver_swap_max'):
+                value = policy[option]
+                if type(value) is not int or value < 0:
+                    raise ValueError('invalid runtime solver limit: ' + option)
+                setattr(a, option, value)
+            record['solver_limits_policy'] = str(policy_path)
+        for option, filename in (('solver_memory_max', 'memory.max'),
+                                 ('solver_swap_max', 'memory.swap.max')):
+            limit = getattr(a, option, None)
+            if limit is not None:
+                target = cgroup / filename
+                if not target.exists():
+                    raise RuntimeError('enable the delegated memory controller before setting ' + filename)
+                target.write_text(str(limit) + '\n')
+                record[option] = limit
         cpu_stats(cgroup)
         if not os.access(cgroup / 'cgroup.procs', os.W_OK) or not os.access(
                 cgroup / 'cgroup.kill', os.W_OK):
@@ -211,6 +242,7 @@ def benchmark(a):
                 process_record = dict(errors=[], leftover_pids=[], leftover_failure=False)
                 cleanup(process_cgroup, process_record)
                 record['process_cpu_stats'] = process_record.get('cpu_stats')
+                record['process_memory_events'] = process_record.get('memory_events', {})
                 record['errors'].extend('verifier cgroup: ' + e for e in process_record['errors'])
                 record['leftover_failure'] |= process_record['leftover_failure']
             if created:

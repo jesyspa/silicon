@@ -41,6 +41,11 @@ class BenchmarkTests(unittest.TestCase):
             self.args('--jvm-arg=-jar')
         a = self.args('--verifier-arg=--proverArgs=-smt2', '--jvm-arg=-Xmx1g')
         self.assertEqual(a.jvm_arg, ['-Xmx1g'])
+        a = self.args('--solver-memory-max=25769803776', '--solver-swap-max=0')
+        self.assertEqual(a.solver_memory_max, 25769803776)
+        self.assertEqual(a.solver_swap_max, 0)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.args('--solver-memory-max=-1')
 
     def test_output_never_overwritten(self):
         a = self.args()
@@ -116,6 +121,14 @@ class BenchmarkTests(unittest.TestCase):
     def test_real_cgroup_cpu_and_timeout(self):
         a = self.args()
         a.cgroup_root = Path(os.environ['VIPER_TEST_CGROUP_ROOT'])
+        memory_enabled = 'memory' in (a.cgroup_root / 'cgroup.subtree_control').read_text()
+        if memory_enabled:
+            a.solver_memory_max = 128 * 1024 * 1024
+            a.solver_swap_max = 0
+            (self.root / 'inputs').mkdir()
+            a.output_directory = self.root / 'inputs' / 'attempt'
+            (self.root / 'solver-limits.json').write_text(json.dumps(dict(
+                solver_memory_max=256 * 1024 * 1024, solver_swap_max=0)))
         a.java = self.root / 'java'
         a.z3 = self.root / 'z3'
         a.java.write_text(f'#!{sys.executable}\n' + '''import pathlib, subprocess, sys, time
@@ -132,7 +145,11 @@ while time.process_time() < end:
         solver = f'#!{sys.executable}\n' + '''import pathlib, sys, time
 if '-version' in sys.argv:
     sys.exit(0)
+leaf = pathlib.Path('/sys/fs/cgroup' + pathlib.Path('/proc/self/cgroup').read_text().strip().split('::')[1])
 print(pathlib.Path('/proc/self/cgroup').read_text(), flush=True)
+if (leaf / 'memory.max').exists():
+    print('memory.max=' + (leaf / 'memory.max').read_text().strip(), flush=True)
+    print('memory.swap.max=' + (leaf / 'memory.swap.max').read_text().strip(), flush=True)
 end = time.process_time() + .08
 while time.process_time() < end:
     pass
@@ -146,6 +163,11 @@ while time.process_time() < end:
         self.assertGreater(record['total_process_cpu_s'], record['solver_cpu_s']['usage'] + .07)
         self.assertIn('verifier-cpu-', (a.output_directory / 'stdout.log').read_text())
         self.assertIn('solver-cpu-', (a.output_directory / 'stdout.log').read_text())
+        if memory_enabled:
+            log = (a.output_directory / 'stdout.log').read_text()
+            self.assertIn('memory.max=268435456', log)
+            self.assertIn('memory.swap.max=0', log)
+            self.assertEqual(record['memory_events']['oom_kill'], 0)
         a.output_directory = self.root / 'timeout'
         a.timeout = 1
         a.z3.write_text(solver + '\ntime.sleep(10)\n')

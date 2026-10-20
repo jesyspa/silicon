@@ -83,9 +83,15 @@ class CorpusTests(unittest.TestCase):
         base = dict(returncode=0, success=True, errors=[], leftover_failure=False)
         self.assertEqual(run.outcome(base, ''), 'verified')
         self.assertEqual(run.outcome(dict(base, timed_out=True), ''), 'timeout')
+        for key in ('memory_events', 'process_memory_events'):
+            self.assertEqual(run.outcome(dict(base, **{key: {'oom_kill': 1}}), ''), 'oom')
         self.assertEqual(run.outcome(dict(base, returncode=1, success=False),
                                      'Verification failed with 2 errors'), 'failed')
         self.assertEqual(run.outcome(dict(base, returncode=1), '2 errors found'), 'failed')
+        for summary in ('Silicon found 1 error in 1.72s:', 'Silicon found 3 errors in 2.06s:'):
+            self.assertEqual(run.outcome(dict(base, returncode=1), summary), 'failed')
+        self.assertEqual(run.outcome(dict(base, returncode=1),
+                                     'Silicon found 1 error: An exception occurred'), 'crash')
         self.assertEqual(run.outcome(dict(base, returncode=1),
                                      'The following errors were found:'), 'failed')
         self.assertEqual(run.outcome(dict(base, returncode=1),
@@ -133,10 +139,12 @@ class CorpusTests(unittest.TestCase):
 
     def test_subprocess_reuses_benchmark_and_flattens_measurement(self):
         args, rows = self.args()
+        rows[0]['verifier_args'] = ['--assumeInjectivityOnInhale']
 
         def invoke(command, **kwargs):
             self.assertEqual(Path(command[1]), Path(run.bench.__file__).resolve())
             self.assertEqual(command[-1], str(self.corpus / rows[0]['path']))
+            self.assertIn('--verifier-arg=--assumeInjectivityOnInhale', command)
             out = Path(command[command.index('--output-directory') + 1])
             out.mkdir()
             (out / 'measurement.json').write_text(json.dumps(dict(
@@ -186,6 +194,12 @@ class CorpusTests(unittest.TestCase):
         self.assertEqual(cpu['regressions'][0]['path'], 'a')
         self.assertEqual(cpu['improvements'][0]['path'], 'b')
         self.assertEqual(group['metrics']['wall_s']['pairs'], 3)
+        old['a']['outcome'] = new['a']['outcome'] = 'failed'
+        verified = compare.compare(old, new, verified_only=True)['groups']['A']
+        self.assertEqual(verified['metrics']['solver_cpu_s']['pairs'], 2)
+        self.assertEqual(verified['outcome_changes'], {'verified -> timeout': 1})
+        self.assertEqual(compare.ratio(old['a'], new['a'], 'solver_cpu_s'), 4)
+        self.assertIsNone(compare.ratio(old['a'], new['a'], 'solver_cpu_s', verified_only=True))
         self.assertIsNone(compare.ratio(row('x', 1, 1, 'timeout'),
                                         row('x', 2, 2, 'timeout'), 'solver_cpu_s'))
 
