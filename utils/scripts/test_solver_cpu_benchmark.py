@@ -1,9 +1,11 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import signal
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -78,7 +80,8 @@ class BenchmarkTests(unittest.TestCase):
 
         def cleaned(cgroup, record):
             cgroup.rmdir()
-            record['cpu_stats'] = {'usage_usec': 0, 'user_usec': 0, 'system_usec': 0}
+            record['cpu_stats'] = {'usage_usec': 10000 if cgroup.name.startswith('verifier-')
+                                   else 30000, 'user_usec': 0, 'system_usec': 0}
 
         with patch.object(bench, 'version', return_value={}), \
                 patch.object(bench, 'cpu_stats', return_value={}), \
@@ -92,6 +95,7 @@ class BenchmarkTests(unittest.TestCase):
         record = json.loads((a.output_directory / 'measurement.json').read_text())
         self.assertTrue(record['timed_out'])
         self.assertEqual(record['returncode'], -signal.SIGKILL)
+        self.assertEqual(record['total_process_cpu_s'], 0.04)
         self.assertFalse(Path(record['cgroup']).exists())
         kill.assert_called_once_with(123, signal.SIGKILL)
 
@@ -107,6 +111,51 @@ class BenchmarkTests(unittest.TestCase):
         for text in (record, stdout.getvalue()):
             self.assertNotIn('UNRELATED_SECRET', text)
             self.assertNotIn('private-token-value', text)
+
+    @unittest.skipUnless(os.environ.get('VIPER_TEST_CGROUP_ROOT'), 'needs delegated cgroup root')
+    def test_real_cgroup_cpu_and_timeout(self):
+        a = self.args()
+        a.cgroup_root = Path(os.environ['VIPER_TEST_CGROUP_ROOT'])
+        a.java = self.root / 'java'
+        a.z3 = self.root / 'z3'
+        a.java.write_text(f'#!{sys.executable}\n' + '''import pathlib, subprocess, sys, time
+if '-version' in sys.argv or '--help' in sys.argv:
+    sys.exit(0)
+print(pathlib.Path('/proc/self/cgroup').read_text(), flush=True)
+wrapper = sys.argv[sys.argv.index('--z3Exe') + 1]
+subprocess.run([wrapper], check=True)
+end = time.process_time() + .08
+while time.process_time() < end:
+    pass
+''')
+        a.java.chmod(0o700)
+        solver = f'#!{sys.executable}\n' + '''import pathlib, sys, time
+if '-version' in sys.argv:
+    sys.exit(0)
+print(pathlib.Path('/proc/self/cgroup').read_text(), flush=True)
+end = time.process_time() + .08
+while time.process_time() < end:
+    pass
+'''
+        a.z3.write_text(solver)
+        a.z3.chmod(0o700)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(bench.benchmark(a), 0)
+        record = json.loads((a.output_directory / 'measurement.json').read_text())
+        self.assertGreater(record['solver_cpu_s']['usage'], .07)
+        self.assertGreater(record['total_process_cpu_s'], record['solver_cpu_s']['usage'] + .07)
+        self.assertIn('verifier-cpu-', (a.output_directory / 'stdout.log').read_text())
+        self.assertIn('solver-cpu-', (a.output_directory / 'stdout.log').read_text())
+        a.output_directory = self.root / 'timeout'
+        a.timeout = 1
+        a.z3.write_text(solver + '\ntime.sleep(10)\n')
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(bench.benchmark(a), 1)
+        record = json.loads((a.output_directory / 'measurement.json').read_text())
+        self.assertTrue(record['timed_out'])
+        self.assertGreater(record['total_process_cpu_s'], record['solver_cpu_s']['usage'])
+        self.assertFalse(Path(record['cgroup']).exists())
+        self.assertEqual(record['errors'], [])
 
     def test_wrapper_exec_preserves_pid(self):
         cgroup = self.root / 'leaf'

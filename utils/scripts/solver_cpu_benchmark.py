@@ -17,7 +17,8 @@ RESERVED = ('prover', 'z3Exe', 'cvc5Exe', 'timeout', 'tempDirectory', 'proverLog
 def arguments(argv=None):
     p = argparse.ArgumentParser(description=__doc__, epilog=(
         'Requires a writable delegated cgroup-v2 root with cpu.stat and cgroup.kill. '
-        'Creates one dedicated solver leaf; Java CPU is excluded. Writes measurement.json '
+        'Creates dedicated solver and verifier leaves; solver CPU excludes Java CPU. '
+        'Also records total process CPU. Writes measurement.json '
         'and merged stdout/stderr to stdout.log. Nonzero exit means '
         'verifier failure, timeout, leftovers, or measurement/cleanup failure. '
         'Use --verifier-arg=--option and --jvm-arg=-Xmx2g for dash-prefixed tokens.'))
@@ -122,6 +123,7 @@ def benchmark(a):
     a.output_directory.mkdir(mode=0o700, parents=True, exist_ok=False)
     out = a.output_directory
     cgroup = a.cgroup_root / ('solver-cpu-' + uuid.uuid4().hex)
+    process_cgroup = a.cgroup_root / ('verifier-cpu-' + uuid.uuid4().hex)
     wrapper = Path(__file__).with_name('z3-cpu-wrapper.sh').resolve()
     command = [str(a.java), *a.jvm_arg, '-jar', str(a.jar), '--prover', 'Z3',
                '--z3Exe', str(wrapper), '--timeout', str(a.timeout),
@@ -138,7 +140,9 @@ def benchmark(a):
     record.update(cwd=os.getcwd(), platform=list(os.uname()), python=sys.version)
     proc = None
     created = False
+    process_created = False
     start = None
+    record['total_process_cpu_s'] = None
     handlers = {}
 
     def interrupted(signum, frame):
@@ -167,10 +171,19 @@ def benchmark(a):
         if not os.access(cgroup / 'cgroup.procs', os.W_OK) or not os.access(
                 cgroup / 'cgroup.kill', os.W_OK):
             raise RuntimeError('delegation requires writable cgroup.procs and cgroup.kill')
+        process_cgroup.mkdir()
+        process_created = True
+        cpu_stats(process_cgroup)
+
+        def enter_process_cgroup():
+            # benchmark() runs in a dedicated, single-threaded CLI process.
+            # Solvers subsequently move to their separately accounted leaf.
+            (process_cgroup / 'cgroup.procs').write_text(str(os.getpid()) + '\n')
+
         with (out / 'stdout.log').open('wb') as log:
             start = time.monotonic()
             proc = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT,
-                                    start_new_session=True)
+                                    start_new_session=True, preexec_fn=enter_process_cgroup)
             try:
                 proc.wait(timeout=a.timeout)
             except subprocess.TimeoutExpired:
@@ -194,8 +207,19 @@ def benchmark(a):
                     record['errors'].append('verifier shutdown: ' + repr(exc))
             if start is not None:
                 record['elapsed_s'] = time.monotonic() - start
+            if process_created:
+                process_record = dict(errors=[], leftover_pids=[], leftover_failure=False)
+                cleanup(process_cgroup, process_record)
+                record['process_cpu_stats'] = process_record.get('cpu_stats')
+                record['errors'].extend('verifier cgroup: ' + e for e in process_record['errors'])
+                record['leftover_failure'] |= process_record['leftover_failure']
             if created:
                 cleanup(cgroup, record)
+            if (record.get('process_cpu_stats') is not None
+                    and record.get('cpu_stats') is not None):
+                record['total_process_cpu_s'] = (
+                    record['process_cpu_stats']['usage_usec']
+                    + record['cpu_stats']['usage_usec']) / 1e6
             record['success'] = (record['returncode'] == 0 and not record['timed_out']
                                  and not record['leftover_failure'] and not record['errors'])
             (out / 'measurement.json').write_text(json.dumps(record, indent=2) + '\n')
