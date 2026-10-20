@@ -19,3 +19,19 @@ class SiliconTestsBasicAliasMergingParallelBranches extends SiliconTestsBasicAli
   override val commandLineArguments: Seq[String] = Seq(
     "--timeout", "60", "--numberOfParallelVerifiers", "2", "--exhaleMode", "0", "--parallelizeBranches")
 }
+
+class SiliconTestsBasicAliasMergingDeferred extends SiliconTestsBasicAliasMerging {
+  override val commandLineArguments: Seq[String] = Seq(
+    "--timeout", "60", "--numberOfParallelVerifiers", "1", "--exhaleMode", "0", "--deferBasicAliasMerging")
+}
+
+class SiliconTestsBasicAliasMergingDeferredMoreComplete extends SiliconTestsBasicAliasMerging {
+  override val commandLineArguments: Seq[String] = Seq(
+    "--timeout", "60", "--numberOfParallelVerifiers", "1", "--exhaleMode", "1", "--deferBasicAliasMerging")
+}
+
+class SiliconTestsBasicAliasMergingDeferredParallelBranches extends SiliconTestsBasicAliasMerging {
+  override val commandLineArguments: Seq[String] = Seq(
+    "--timeout", "60", "--numberOfParallelVerifiers", "2", "--exhaleMode", "0", "--parallelizeBranches",
+    "--deferBasicAliasMerging")
+}

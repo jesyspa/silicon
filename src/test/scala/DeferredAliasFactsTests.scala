@@ -10,14 +10,13 @@ import viper.silver.reporter.NoopReporter
 import viper.silver.verifier.{Failure, Success}
 
 class DeferredAliasFactsTests extends AnyFunSuite {
-  private val deferred = java.lang.Boolean.getBoolean("silicon.deferBasicAliasMerging")
-
-  for ((mode, parallel) <- Seq(("0", false), ("1", false), ("0", true))) {
+  for (deferred <- Seq(false, true); (mode, parallel) <- Seq(("0", false), ("1", false), ("0", true))) {
     test(s"persistent alias facts and their guards: exhale=$mode parallel=$parallel deferred=$deferred") {
       val backend = new Silicon(NoopReporter)
       val branchArgs = if (parallel) Seq("--parallelizeBranches") else Nil
+      val deferArgs = if (deferred) Seq("--deferBasicAliasMerging") else Nil
       backend.parseCommandLine(Seq("--exhaleMode", mode, "--exhaleModeQP", "1",
-        "--numberOfParallelVerifiers", (if (parallel) "2" else "1")) ++ branchArgs :+ Silicon.dummyInputFilename)
+        "--numberOfParallelVerifiers", (if (parallel) "2" else "1")) ++ branchArgs ++ deferArgs :+ Silicon.dummyInputFilename)
       backend.start()
       try {
         val frontend = new tests.DummyFrontend

@@ -60,8 +60,6 @@ class MinimalStateConsolidator extends StateConsolidationRules {
   * additional properties from and about permissions, (non)aliasing, and field values.
   */
 class DefaultStateConsolidator(protected val config: Config) extends StateConsolidationRules {
-  private val deferBasicAliasMerging = java.lang.Boolean.getBoolean("silicon.deferBasicAliasMerging")
-
   def consolidate(s: State, v: Verifier): State = {
     val comLog = new CommentRecord("state consolidation", s, v.decider.pcs)
     val sepIdentifier = v.symbExLog.openScope(comLog)
@@ -151,7 +149,7 @@ class DefaultStateConsolidator(protected val config: Config) extends StateConsol
   def merge(fr1: FunctionRecorder, s: State, h: Heap, newH: Heap, v: Verifier): (FunctionRecorder, Heap) = {
     val mergeLog = new CommentRecord("Merge", null, v.decider.pcs)
     val sepIdentifier = v.symbExLog.openScope(mergeLog)
-    val (fr2, mergedChunks, newlyAddedChunks, snapEqs) = singleMerge(fr1, s, h.values.toSeq, newH.values.toSeq, (s.functionRecorderQuantifiedVariables() ++ s.packagingWandSnapshots).map(_._1), deferBasicAliasMerging && !s.retrying, v)
+    val (fr2, mergedChunks, newlyAddedChunks, snapEqs) = singleMerge(fr1, s, h.values.toSeq, newH.values.toSeq, (s.functionRecorderQuantifiedVariables() ++ s.packagingWandSnapshots).map(_._1), config.deferBasicAliasMerging() && !s.retrying, v)
 
     v.decider.assume(snapEqs, Option.when(debugOn)(DebugExp.createInstance("Snapshot", isInternal_ = true)), enforceAssumption = false)
 

@@ -609,6 +609,14 @@ class Config(args: Seq[String]) extends SilFrontendConfig(args, "Silicon") {
     noshort = true
   )(singleArgConverter(mode => StateConsolidationMode(mode.toInt)))
 
+  val deferBasicAliasMerging: ScallopOption[Boolean] = opt[Boolean]("deferBasicAliasMerging",
+    descr = ( "When adding non-quantified chunks to the heap outside of retries, merge only syntactically "
+            + "equal chunks and assume guarded snapshot and permission facts for possible aliases "
+            + "instead of querying the prover. Full alias merging happens during state consolidation."),
+    default = Some(false),
+    noshort = true
+  )
+
   val numberOfParallelVerifiers: ScallopOption[Int] = opt[Int]("numberOfParallelVerifiers",
     descr = ( "Number of verifiers (and therefore also prover instances) run in parallel for method verification." +
               "A value of 1 leads to sequential method verification. " +
