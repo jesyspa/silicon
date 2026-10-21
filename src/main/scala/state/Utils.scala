@@ -219,6 +219,10 @@ package object utils {
       case PermAtMost(p0, p1) => PermAtMost(go(p0), go(p1))
       case PermMin(p0, p1) => PermMin(go(p0), go(p1))
       case App(f, ts) => App(f, ts map go)
+      case _ => recurseCollections(term)
+    }
+
+    def recurseCollections(term: Term): Term = term match {
       case SeqRanged(t0, t1) => SeqRanged(go(t0), go(t1))
       case SeqSingleton(t) => SeqSingleton(go(t))
       case SeqAppend(t0, t1) => SeqAppend(go(t0), go(t1))
@@ -251,6 +255,10 @@ package object utils {
       case MapUpdate(t0, t1, t2) => MapUpdate(go(t0), go(t1), go(t2))
       case MapDomain(t) => MapDomain(go(t))
       case MapRange(t) => MapRange(go(t))
+      case _ => recurseHeap(term)
+    }
+
+    def recurseHeap(term: Term): Term = term match {
       case MagicWandSnapshot(t) => MagicWandSnapshot(go(t))
       case MWSFLookup(t0, t1) => MWSFLookup(go(t0), go(t1))
       case MagicWandToken(t0, t1) => MagicWandToken(go(t0), go(t1))

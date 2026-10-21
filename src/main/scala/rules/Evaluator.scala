@@ -142,12 +142,13 @@ object evaluator extends EvaluationRules {
       Q(s4, t, eNew, v1)})
   }
 
+  // Dispatch falls through AST families to keep each method below HotSpot's huge-method limit.
   protected def eval2(s: State, e: ast.Exp, pve: PartialVerificationError, v: Verifier)
                      (Q: (State, Term, Option[ast.Exp], Verifier) => VerificationResult)
                      : VerificationResult = {
     val eOpt = Option.when(debugOn)(e)
 
-    val resultTerm = e match {
+    e match {
       case _: ast.TrueLit => Q(s, True, eOpt, v)
       case _: ast.FalseLit => Q(s, False, eOpt, v)
 
@@ -325,6 +326,13 @@ object evaluator extends EvaluationRules {
             Q(s4, t3, eNew, v4)
           }))
 
+      case _ => evalArithmetic(s, e, pve, v)(Q)
+    }
+  }
+
+  private def evalArithmetic(s: State, e: ast.Exp, pve: PartialVerificationError, v: Verifier)
+                            (Q: (State, Term, Option[ast.Exp], Verifier) => VerificationResult)
+                            : VerificationResult = e match {
       /* Integers */
 
       case ast.Add(e0, e1) =>
@@ -405,8 +413,12 @@ object evaluator extends EvaluationRules {
       case ast.PermGtCmp(e0, e1) =>
         evalBinOp(s, e0, e1, Greater, pve, v)((s1, t, e0New, e1New, v1) => Q(s1, t, e0New.map(e0p => ast.PermGtCmp(e0p, e1New.get)(e.pos, e.info, e.errT)), v1))
 
-      /* Others */
+      case _ => evalHeapAndQuantified(s, e, pve, v)(Q)
+    }
 
+  private def evalHeapAndQuantified(s: State, e: ast.Exp, pve: PartialVerificationError, v: Verifier)
+                                   (Q: (State, Term, Option[ast.Exp], Verifier) => VerificationResult)
+                                   : VerificationResult = e match {
       /* Domains not handled directly */
       case dfa @ ast.DomainFuncApp(funcName, eArgs, m) =>
         evals(s, eArgs, _ => pve, v)((s1, tArgs, eArgsNew, v1) => {
@@ -802,6 +814,12 @@ object evaluator extends EvaluationRules {
           eval(s3, eIn, pve, v2)(Q)
         })
 
+      case _ => evalCollections(s, e, pve, v)(Q)
+    }
+
+  private def evalCollections(s: State, e: ast.Exp, pve: PartialVerificationError, v: Verifier)
+                             (Q: (State, Term, Option[ast.Exp], Verifier) => VerificationResult)
+                             : VerificationResult = e match {
       /* Sequences */
 
       case ast.SeqContains(e0, e1) => evalBinOp(s, e1, e0, SeqIn, pve, v)((s1, t, e1New, e0New, v1) =>
@@ -995,9 +1013,6 @@ object evaluator extends EvaluationRules {
          | _: ast.ExtensionExp =>
         sys.error(s"Unexpected expression $e cannot be symbolically evaluated")
     }
-
-    resultTerm
-  }
 
 
   private def assertSeqIndexBounds(tIndex: Term, tSeq: Term, eIndex: ast.Exp, eSeq: ast.Exp, expNew: Option[Seq[ast.Exp]], pve: PartialVerificationError, s: State, v: Verifier): VerificationResult = {
