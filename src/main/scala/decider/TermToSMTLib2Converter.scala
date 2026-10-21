@@ -28,6 +28,8 @@ class TermToSMTLib2Converter
   private val nameSanitizer = new SmtlibNameSanitizer
 
   /* Subterms bound by `let`s in the term currently being converted, or null if there are none in scope.
+   * Like `sanitizedNamesCache`, this state requires that an instance is used by one thread at a time; each verifier
+   * owns its converter.
    * Only nodes whose binding level is below `bindingLimit` may be referenced by name: while rendering the
    * definition of a node at level L, only names from levels < L are bound.
    */
@@ -115,20 +117,21 @@ class TermToSMTLib2Converter
 
   def convert(t: Term): String = {
     val sb = new StringBuilder
-    val outerShared = sharedTerms
-    val outerLimit = bindingLimit
-    try {
-      SharingAnalysis.analyse(t) match {
-        case None =>
-          sharedTerms = null
-          renderTerm(t, sb)
-        case Some((shared, levels)) =>
+    SharingAnalysis.analyse(t) match {
+      case None =>
+        /* Leaves the fields untouched, so that converters that never share (e.g. the global ones used for reporting)
+         * are not affected by races on them. */
+        renderTerm(t, sb)
+      case Some((shared, levels)) =>
+        val outerShared = sharedTerms
+        val outerLimit = bindingLimit
+        try {
           sharedTerms = shared
           renderLets(t, levels, sb)
-      }
-    } finally {
-      sharedTerms = outerShared
-      bindingLimit = outerLimit
+        } finally {
+          sharedTerms = outerShared
+          bindingLimit = outerLimit
+        }
     }
     sb.toString
   }
@@ -161,9 +164,13 @@ class TermToSMTLib2Converter
   @inline
   private def withoutSharing(render: => Unit): Unit = {
     val outerShared = sharedTerms
-    sharedTerms = null
-    try render
-    finally sharedTerms = outerShared
+    if (outerShared == null) {
+      render
+    } else {
+      sharedTerms = null
+      try render
+      finally sharedTerms = outerShared
+    }
   }
 
   private def renderHeapType(s: Sort, sb: StringBuilder): Unit = s match {
@@ -628,9 +635,11 @@ private final class SharingInfo {
   * and are rendered in the outermost scope.
   */
 private object SharingAnalysis {
-  /* Sharing is only used if it shrinks a term a lot, since it makes the SMT output harder to read. */
-  private val minTreeSize = 1000
-  private val minCompressionFactor = 2
+  /* Sharing is only used for terms that are huge as trees and shrink a lot as DAGs. Lets change the order in which
+   * Z3 creates terms, which perturbs its search: lower thresholds (1000 nodes, factor 2 or 10) made some verifying
+   * programs time out or fail. */
+  private val minTreeSize = 10000
+  private val minCompressionFactor = 10
 
   private def isShareable(t: Term): Boolean = t match {
     case hvr: HasVarRepr if hvr.varRepr.isDefined => false
