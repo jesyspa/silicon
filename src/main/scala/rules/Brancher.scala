@@ -12,7 +12,7 @@ import viper.silicon.decider.PathConditionStack
 import viper.silicon.interfaces.{Unreachable, VerificationResult}
 import viper.silicon.reporting.condenseToViperResult
 import viper.silicon.state.State
-import viper.silicon.state.terms.{FunctionDecl, MacroDecl, Not, Term}
+import viper.silicon.state.terms.{False, FunctionDecl, MacroDecl, Not, Term, True}
 import viper.silicon.verifier.Verifier
 import viper.silver.ast
 import viper.silver.reporter.BranchFailureMessage
@@ -60,16 +60,23 @@ object brancher extends BranchingRules {
           && allQuantifiedVariables.map(_._1).exists(condition.freeVariables.contains))
     )
 
+    // Literal conditions need no feasibility probes, even in inconsistent contexts.
     /* True if the then-branch is to be explored */
-    val executeThenBranch = (
-         skipPathFeasibilityCheck
-      || !v.decider.check(negatedCondition, Verifier.config.checkTimeout()))
+    val executeThenBranch = condition match {
+      case True => true
+      case False => false
+      case _ => skipPathFeasibilityCheck || !v.decider.check(negatedCondition, Verifier.config.checkTimeout())
+    }
 
-    /* False if the then-branch is to be explored */
-    val executeElseBranch = (
-         !executeThenBranch /* Assumes that ast least one branch is feasible */
-      || skipPathFeasibilityCheck
-      || !v.decider.check(condition, Verifier.config.checkTimeout()))
+    /* True if the else-branch is to be explored */
+    val executeElseBranch = condition match {
+      case True => false
+      case False => true
+      case _ => (
+           !executeThenBranch /* Assumes that at least one branch is feasible */
+        || skipPathFeasibilityCheck
+        || !v.decider.check(condition, Verifier.config.checkTimeout()))
+    }
 
     val parallelizeElseBranch = s.parallelizeBranches && executeThenBranch && executeElseBranch
 
