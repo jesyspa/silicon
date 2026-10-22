@@ -427,7 +427,11 @@ object consumer extends ConsumptionRules {
         }
         v2.decider.assert(termToAssert) {
           case true =>
-            v2.decider.assume(t, Option.when(debugOn)(e), eNew)
+            /* Re-assuming a just-proven quantifier adds nothing logically, but its triggers can
+             * start matching loops (e.g. after substitution, a trigger may match its own body).
+             */
+            if (!t.isInstanceOf[Quantification])
+              v2.decider.assume(t, Option.when(debugOn)(e), eNew)
             QS(s2, v2)
           case false =>
             val failure = createFailure(pve dueTo AssertionFalse(e), v2, s2, termToAssert, eNew)
