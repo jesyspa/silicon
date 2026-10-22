@@ -379,7 +379,14 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
       prover.check(timeout) == Unsat
     }
 
-    def check(t: Term, timeout: Int): Boolean = deciderAssert(t, Some(timeout))
+    def check(t: Term, timeout: Int): Boolean = {
+      val negated = t match {
+        case Not(a) => a
+        case _ => Not(t)
+      }
+      if (pcs.assumptions contains negated) false
+      else deciderAssert(t, Some(timeout))
+    }
 
     def assert(t: Term, timeout: Option[Int] = Verifier.config.assertTimeout.toOption)
               (Q: Boolean => VerificationResult)
