@@ -74,6 +74,34 @@ Repeat the same command to resume. The harness validates every input's size and 
 
 After an interruption, an incomplete final JSONL line is truncated and rerun. Complete malformed records are rejected. Attempts without a committed results line are rerun into new directories; old logs remain for inspection. Prefer Ctrl-C or SIGTERM to the benchmark processes for cleanup. SIGKILL cannot run cleanup; inspect the delegated subtree and terminate leftover processes before resuming.
 
+## Warm JVM mode
+
+A cold JVM spends much of a small file's CPU on JIT compilation. `--warm` instead keeps one long-lived `WarmRunner` JVM per job. Each input gets a fresh Silicon frontend in that JVM, limited by Silicon's own `--timeout`. No cgroup is needed, so omit `--cgroup-root`; pin CPUs by running the harness under `taskset`, and bound memory with a systemd scope if needed:
+
+```sh
+systemd-run --user --scope -p MemoryMax=12G \
+  taskset -c 2,3,10,11 python3 utils/scripts/viper_corpus/run.py \
+  --corpus-root "$CORPUS" --manifest "$BENCH/quick.jsonl" \
+  --jar /absolute/path/to/silicon.jar --java /absolute/path/to/java --z3 /absolute/path/to/z3 \
+  --output-directory "$BENCH/warm-quick" --jobs 2 --timeout 300 --jvm-arg=-Xmx5g \
+  --warm --warm-runs 2
+```
+
+`run.py` compiles `WarmRunner.java` with the `javac` and `jar` next to `--java` into `runner.jar` in the output directory and runs `java -cp runner.jar:silicon.jar WarmRunner`. The runner uses only the public frontend API, so it works with older Silicon JARs. Each request is a stdin line: a log path, then Silicon arguments, separated by tabs. Each response is one JSON line with `success`, `wall_s`, JVM CPU ticks, reaped-children CPU ticks, heap after GC, and `fatal`.
+
+Results add these fields:
+
+- `solver_cpu_s`: CPU of reaped child processes, which is Z3. It is the `cutime`+`cstime` change in `/proc/self/stat` across the request.
+- `jvm_cpu_s`: the runner's own CPU, which includes JIT and GC threads.
+- `total_process_cpu_s`: the sum of `solver_cpu_s` and `jvm_cpu_s`.
+- `heap_after_gc_bytes`: used heap after `System.gc()`.
+- `lane`, `runner_start`, `runner_served`, `after_restart`: the job slot, its runner start count, the number of files this runner verified before, and whether the runner has been restarted.
+- `warmup`: the same fields for earlier `--warm-runs` verifications. The top-level fields describe the last run.
+
+The JVM runs with `-XX:+ExitOnOutOfMemoryError`. The harness restarts a runner that dies or reports a fatal `Error`, and also one that gives no answer within the timeout plus 30 s, which it then kills with its process group. A runner that dies with exit status 3 makes the file's outcome `oom`, a runner with no answer gives `timeout`, and other deaths give `crash`. Other outcomes come from the log as in cold mode.
+
+Results stay comparable with `compare.py`. Warm and cold outcomes can differ where stack depth matters. JIT-compiled frames are smaller, so a file that overflows the stack in a cold JVM can verify in a warm one. Solver memory limits need cgroups and are rejected with `--warm`.
+
 ## Compare
 
 Run the candidate JAR into another output directory with the same manifest and options, then:

@@ -5,11 +5,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import fcntl
 import json
 import os
+import queue
+import select
+import signal
 from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -63,7 +67,7 @@ def outcome(measurement, log):
     if measurement.get('errors') or measurement.get('leftover_failure'):
         return 'crash'
     code = measurement.get('returncode')
-    if re.search(r'(?i)verification[^\n]*(?:timed out|timeout)', log):
+    if re.search(r'(?i)verification[^\n]*(?:timed out|timeout)|timeout occurred after', log):
         return 'timeout'
     if re.search(r'(?i)exception in thread|an exception occurred|internal error|'
                  r'java\.lang\.[\w.]+(?:Exception|Error)|verification aborted exceptionally', log):
@@ -112,6 +116,118 @@ def run_one(row, args):
                     [completed.stderr.decode(errors='replace')] if not measurement else []))
 
 
+RUNNER = Path(__file__).with_name('WarmRunner.java')
+HANG_GRACE_S = 30
+OOM_EXIT = 3  # -XX:+ExitOnOutOfMemoryError
+
+
+def build_runner(args):
+    """Compile WarmRunner against the measured JAR into the output directory."""
+    target = args.output_directory / 'runner.jar'
+    with tempfile.TemporaryDirectory() as classes:
+        subprocess.run([str(args.java.with_name('javac')), '--release', '11', '-cp', str(args.jar),
+                        '-d', classes, str(RUNNER)], check=True)
+        subprocess.run([str(args.java.with_name('jar')), 'cf', str(target), '-C', classes, '.'],
+                       check=True)
+    return target
+
+
+class Lane:
+    """One long-lived WarmRunner; restarted after it dies, hangs, or hits an Error."""
+
+    def __init__(self, args, index, runner):
+        self.args, self.index, self.runner = args, index, runner
+        self.process, self.starts, self.served = None, 0, 0
+
+    def start(self):
+        stderr = (self.args.output_directory / f'runner-{self.index}.log').open('ab')
+        self.process = subprocess.Popen(
+            [str(self.args.java), *self.args.jvm_arg, '-XX:+ExitOnOutOfMemoryError',
+             '-cp', f'{self.runner}:{self.args.jar}', 'WarmRunner'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr, start_new_session=True)
+        stderr.close()
+        self.starts, self.served = self.starts + 1, 0
+        if self.read(60) != {'ready': True}:
+            raise OSError('warm runner did not start; see ' + stderr.name)
+
+    def read(self, timeout):
+        """Return the next response, {} if the runner exited, or None after the timeout."""
+        ready, _, _ = select.select([self.process.stdout], [], [], timeout)
+        if not ready:
+            return None
+        line = self.process.stdout.readline()
+        return json.loads(line) if line.endswith(b'\n') else {}
+
+    def stop(self):
+        """Kill the runner and its solvers; return the runner's exit status."""
+        if self.process is None:
+            return None
+        with self.process as process:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        self.process = None
+        return process.returncode
+
+    def verify(self, log, options):
+        """Return (response or None, failed outcome, runner context) for one request."""
+        if self.process is None or self.process.poll() is not None:
+            self.stop()
+            self.start()
+        context = dict(lane=self.index, runner_start=self.starts, runner_served=self.served,
+                       after_restart=self.starts > 1)
+        self.served += 1
+        try:
+            self.process.stdin.write(('\t'.join([str(log), *options]) + '\n').encode())
+            self.process.stdin.flush()
+        except BrokenPipeError:
+            pass
+        response = self.read(self.args.timeout + HANG_GRACE_S)
+        if response:
+            if response['fatal']:
+                self.stop()
+            return response, None, context
+        hung = response is None
+        code = self.stop()
+        return None, 'timeout' if hung else 'oom' if code == OOM_EXIT else 'crash', context
+
+
+def run_warm_once(row, args, lane):
+    relative = Path('inputs') / (row['sha256'] + '-' + uuid.uuid4().hex)
+    directory = args.output_directory / relative
+    directory.mkdir(parents=True)
+    options = ['--prover', 'Z3', '--z3Exe', str(args.z3), '--timeout', str(args.timeout),
+               *args.verifier_arg, *row.get('verifier_args', []), str(args.corpus_root / row['path'])]
+    response, failure, context = lane.verify(directory / 'stdout.log', options)
+    measurement = dict(response or {}, **context, failure=failure)
+    (directory / 'measurement.json').write_text(json.dumps(measurement, indent=2) + '\n')
+    log_path = directory / 'stdout.log'
+    log = log_path.read_text(errors='replace') if log_path.exists() else ''
+    tick = os.sysconf('SC_CLK_TCK')
+    result = dict(outcome=failure or outcome(dict(
+                      returncode=0 if response['success'] else 1, success=response['success']), log),
+                  wall_s=None, solver_cpu_s=None, total_process_cpu_s=None, jvm_cpu_s=None,
+                  heap_after_gc_bytes=None, measurement=str(relative / 'measurement.json'), **context)
+    if response:
+        result.update(wall_s=response['wall_s'], solver_cpu_s=response['children_cpu_ticks'] / tick,
+                      jvm_cpu_s=response['jvm_cpu_ticks'] / tick,
+                      total_process_cpu_s=(response['jvm_cpu_ticks'] +
+                                           response['children_cpu_ticks']) / tick,
+                      heap_after_gc_bytes=response['heap_after_gc_bytes'])
+    return result
+
+
+def run_warm(row, args, lanes):
+    lane = lanes.get()
+    try:
+        runs = [run_warm_once(row, args, lane) for _ in range(args.warm_runs)]
+    finally:
+        lanes.put(lane)
+    # The last run is the measurement; earlier warm-up runs are kept alongside it.
+    return dict(**row, **runs[-1], returncode=None, errors=[], warmup=runs[:-1])
+
+
 def execute(args, rows):
     args.output_directory.mkdir(parents=True, exist_ok=True)
     with (args.output_directory / '.lock').open('w') as lock:
@@ -126,6 +242,8 @@ def execute(args, rows):
             value = getattr(args, option, None)
             if value is not None:
                 config[option] = value
+        if args.warm:
+            config.update(mode='warm', warm_runs=args.warm_runs)
         config_path = args.output_directory / 'run.json'
         if config_path.exists():
             if json.loads(config_path.read_text()) != config:
@@ -146,8 +264,14 @@ def execute(args, rows):
                 raise ValueError('results do not match manifest or contain duplicate paths')
             done.add(row['path'])
         pending = [row for row in rows if row['path'] not in done]
+        lanes = queue.Queue()
+        if args.warm and pending:
+            runner = build_runner(args)
+            for index in range(args.jobs):
+                lanes.put(Lane(args, index, runner))
         with results.open('a') as sink, ThreadPoolExecutor(max_workers=args.jobs) as pool:
-            futures = [pool.submit(run_one, row, args) for row in pending]
+            futures = [pool.submit(run_warm, row, args, lanes) if args.warm else
+                       pool.submit(run_one, row, args) for row in pending]
             try:
                 for future in as_completed(futures):
                     record = future.result()
@@ -159,6 +283,9 @@ def execute(args, rows):
                 # Do not start the rest of the corpus after an interruption.
                 pool.shutdown(wait=True, cancel_futures=True)
                 raise
+            finally:
+                while not lanes.empty():
+                    lanes.get().stop()
 
 
 def main(argv=None):
@@ -167,7 +294,7 @@ def main(argv=None):
     parser.add_argument('--corpus-root', required=True, type=Path)
     parser.add_argument('--manifest', required=True, type=Path)
     parser.add_argument('--output-directory', required=True, type=Path)
-    parser.add_argument('--cgroup-root', required=True, type=Path)
+    parser.add_argument('--cgroup-root', type=Path, help='required unless --warm')
     parser.add_argument('--jar', required=True, type=Path)
     parser.add_argument('--java', type=Path, default=Path(shutil.which('java') or 'java'))
     parser.add_argument('--z3', type=Path, default=Path(shutil.which('z3') or 'z3'))
@@ -177,16 +304,29 @@ def main(argv=None):
     parser.add_argument('--solver-swap-max', type=int, help='solver leaf memory.swap.max in bytes')
     parser.add_argument('--jvm-arg', action='append', default=[])
     parser.add_argument('--verifier-arg', action='append', default=[])
+    parser.add_argument('--warm', action='store_true',
+                        help='verify in one long-lived JVM per job instead of cgroup-isolated processes')
+    parser.add_argument('--warm-runs', type=int, default=1,
+                        help='verifications per file in --warm mode; the last is measured')
     args = parser.parse_args(argv)
+    if args.warm != (args.cgroup_root is None):
+        parser.error('use exactly one of --warm and --cgroup-root')
+    if args.warm and (args.solver_memory_max is not None or args.solver_swap_max is not None):
+        parser.error('solver memory limits need cgroups and are not supported with --warm')
+    if args.warm_runs <= 0 or (args.warm_runs != 1 and not args.warm):
+        parser.error('--warm-runs must be positive and needs --warm')
     if args.jobs <= 0 or args.timeout <= 0:
         parser.error('jobs and timeout must be positive')
     if any(v is not None and v < 0 for v in (args.solver_memory_max, args.solver_swap_max)):
         parser.error('solver memory/swap limits must be nonnegative')
     for name in ('corpus_root', 'manifest', 'output_directory', 'cgroup_root', 'jar', 'java', 'z3'):
-        setattr(args, name, getattr(args, name).resolve())
-    # Reuse the benchmark's option guards and executable/cgroup validation.
+        if getattr(args, name) is not None:
+            setattr(args, name, getattr(args, name).resolve())
+    # Reuse the benchmark's option guards and executable/cgroup validation. Warm mode
+    # uses no cgroup, so the host's cgroup-v2 mount stands in for the checked root.
     bench.arguments(['--java', str(args.java), '--jar', str(args.jar), '--z3', str(args.z3),
-                     '--cgroup-root', str(args.cgroup_root), '--output-directory',
+                     '--cgroup-root', str(args.cgroup_root or '/sys/fs/cgroup'),
+                     '--output-directory',
                      str(args.output_directory / 'validation'), str(args.manifest),
                      *['--jvm-arg=' + t for t in args.jvm_arg],
                      *['--verifier-arg=' + t for t in args.verifier_arg]])

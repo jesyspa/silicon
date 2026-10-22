@@ -2,8 +2,10 @@ import argparse
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -99,6 +101,8 @@ class CorpusTests(unittest.TestCase):
         self.assertEqual(run.outcome(dict(base, returncode=1), 'Verification timed out'), 'timeout')
         self.assertEqual(run.outcome(dict(base, returncode=1),
                                      'Verification aborted due to a timeout after 1 second'), 'timeout')
+        self.assertEqual(run.outcome(dict(base, returncode=1), 'Silicon found 1 error in 02m:00s:\n'
+                                     '  [0] Timeout occurred after 120 second(s)'), 'timeout')
         self.assertEqual(run.outcome(dict(base, errors=['accounting failed']), ''), 'crash')
         self.assertEqual(run.outcome(dict(base, returncode=-9), ''), 'crash')
         self.assertEqual(run.outcome(dict(base, returncode=1), 'Exception'), 'crash')
@@ -111,7 +115,8 @@ class CorpusTests(unittest.TestCase):
         return argparse.Namespace(manifest=manifest, corpus_root=self.corpus,
                                   output_directory=self.root / 'output', timeout=300,
                                   java=binary, jar=binary, z3=binary, cgroup_root=self.root,
-                                  jvm_arg=[], verifier_arg=[], jobs=2), rows
+                                  jvm_arg=[], verifier_arg=[], jobs=2, warm=False,
+                                  warm_runs=1), rows
 
     def test_resume_skips_completed_repairs_tail_and_rejects_configuration_change(self):
         args, rows = self.args()
@@ -169,6 +174,52 @@ class CorpusTests(unittest.TestCase):
         self.assertEqual(result['outcome'], 'crash')
         self.assertIsNone(result['solver_cpu_s'])
         self.assertEqual(result['errors'], ['worker failed'])
+
+    def test_warm_lane_classifies_restarts_and_keeps_warmup(self):
+        # A fake JVM: behaviour is chosen by the input name; 'hang' sleeps past the deadline.
+        java = self.root / 'java'
+        java.write_text('#!' + sys.executable + '\n' + '''
+import json, os, sys, time
+print(json.dumps(dict(ready=True)), flush=True)
+for line in sys.stdin:
+    log, *options = line.rstrip('\\n').split('\\t')
+    name = os.path.basename(options[-1])
+    if name == 'oom.vpr': sys.exit(3)
+    if name == 'hang.vpr': time.sleep(60)
+    if name == 'die.vpr': sys.exit(1)
+    open(log, 'w').write('Silicon found 1 error' if name == 'bad.vpr' else 'ok')
+    print(json.dumps(dict(success=name == 'a.vpr', wall_s=0.5, jvm_cpu_ticks=200,
+                          children_cpu_ticks=100, heap_after_gc_bytes=7,
+                          fatal=name == 'fatal.vpr')), flush=True)
+''')
+        java.chmod(0o755)
+        args, rows = self.args()
+        args.java, args.warm, args.jobs, args.timeout = java, True, 1, 1
+        run.HANG_GRACE_S = 0.5
+        self.addCleanup(setattr, run, 'HANG_GRACE_S', 30)
+        names = ['a', 'bad', 'oom', 'a', 'hang', 'fatal', 'a', 'die', 'a']
+        rows = [dict(rows[0], path=f'A/{i}/{n}.vpr') for i, n in enumerate(names)]
+        lane = run.Lane(args, 0, java)
+        self.addCleanup(lane.stop)
+        results = [run.run_warm_once(row, args, lane) for row in rows]
+        self.assertEqual([r['outcome'] for r in results],
+                         ['verified', 'failed', 'oom', 'verified', 'timeout', 'crash',
+                          'verified', 'crash', 'verified'])
+        self.assertEqual([r['runner_start'] for r in results], [1, 1, 1, 2, 2, 3, 4, 4, 5])
+        self.assertEqual([r['runner_served'] for r in results], [0, 1, 2, 0, 1, 0, 0, 1, 0])
+        self.assertFalse(results[0]['after_restart'])
+        self.assertTrue(results[3]['after_restart'])
+        tick = os.sysconf('SC_CLK_TCK')
+        self.assertEqual(results[0]['solver_cpu_s'], 100 / tick)
+        self.assertEqual(results[0]['total_process_cpu_s'], 300 / tick)
+        self.assertIsNone(results[2]['wall_s'])
+        args.warm_runs = 2
+        lanes = run.queue.Queue()
+        lanes.put(run.Lane(args, 1, java))
+        self.addCleanup(lanes.queue[0].stop)
+        record = run.run_warm(rows[0], args, lanes)
+        self.assertEqual(record['runner_served'], 1)
+        self.assertEqual([w['runner_served'] for w in record['warmup']], [0])
 
     def test_compare_pairs_outcomes_missing_inputs_and_rankings(self):
         def row(path, cpu, wall, outcome='verified', sha='hash'):
