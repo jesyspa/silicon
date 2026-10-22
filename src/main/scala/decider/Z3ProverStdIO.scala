@@ -68,8 +68,7 @@ class Z3ProverStdIO(uniqueId: String,
     emit(contents)
     if (Verifier.config.disableNL.getOrElse(false)) {
       comment("We disable non-linear integer arithmetic")
-      writeLine(s"(set-option :smt.arith.nl false)")
-      readSuccess()
+      emit(s"(set-option :smt.arith.nl false)")
     }
   }
 }

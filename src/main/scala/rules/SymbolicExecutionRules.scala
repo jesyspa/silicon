@@ -94,7 +94,7 @@ trait SymbolicExecutionRules {
       } else None
     } else None
 
-    val reasonUnknown = if (v != null && Verifier.config.reportReasonUnknown()) {
+    val reasonUnknown = if (v != null && (Verifier.config.reportReasonUnknown() || v.decider.prover.ranOutOfMemory())) {
       Some(v.decider.prover.getReasonUnknown())
     } else {
       None

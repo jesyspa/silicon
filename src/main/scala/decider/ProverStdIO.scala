@@ -39,6 +39,12 @@ abstract class ProverStdIO(uniqueId: String,
   protected var output: PrintWriter = _
   protected var allDecls: Seq[Decl] = Seq()
   protected var allEmits: Seq[String] = Seq()
+  protected var userArgs: Option[String] = None
+  /* The commands that make up the prover's current state, one buffer per push-pop scope, such that
+   * the state can be rebuilt after a prover restart. See [[restartAfterMemoryOut]].
+   */
+  protected var scopedCommands: Vector[mutable.ArrayBuffer[String]] = Vector(mutable.ArrayBuffer())
+  protected var lastCheckRanOutOfMemory: Boolean = false
 
   var proverPath: Path = _
   var lastReasonUnknown : String = _
@@ -88,11 +94,12 @@ abstract class ProverStdIO(uniqueId: String,
     }
     pushPopScopeDepth = 0
     lastTimeout = -1
+    userArgs = userArgsString
+    scopedCommands = Vector(mutable.ArrayBuffer())
     logfileWriter = if (!Verifier.config.outputProverLog) null else viper.silver.utility.Common.PrintWriter(Verifier.config.proverLogFile(uniqueId).toFile)
     proverPath = getProverPath
     prover = createProverInstance(userArgsString)
-    input = new BufferedReader(new InputStreamReader(prover.getInputStream))
-    output = new PrintWriter(new BufferedWriter(new OutputStreamWriter(prover.getOutputStream)), true)
+    connectToProver()
     // Register a shutdown hook to stop prover when the JVM gracefully terminates.
     // Note that if the JVM abruptly terminates (e.g. because of a SIGKILL)
     // this hook will not be executed and the prover process will be left running.
@@ -104,6 +111,11 @@ abstract class ProverStdIO(uniqueId: String,
       }
     }
     Runtime.getRuntime.addShutdownHook(proverShutdownHook)
+  }
+
+  protected def connectToProver(): Unit = {
+    input = new BufferedReader(new InputStreamReader(prover.getInputStream))
+    output = new PrintWriter(new BufferedWriter(new OutputStreamWriter(prover.getOutputStream)), true)
   }
 
   protected def createProverInstance(userArgsString: Option[String]): Process = {
@@ -179,6 +191,7 @@ abstract class ProverStdIO(uniqueId: String,
       }
       allDecls = Seq()
       allEmits = Seq()
+      scopedCommands = Vector(mutable.ArrayBuffer())
       preambleAssumptions = Seq()
     }
   }
@@ -189,6 +202,7 @@ abstract class ProverStdIO(uniqueId: String,
     val cmd = (if (n == 1) "(push)" else "(push " + n + ")") + " ; " + pushPopScopeDepth
     writeLine(cmd)
     readSuccess()
+    scopedCommands ++= Vector.fill(n)(mutable.ArrayBuffer[String]())
   }
 
   def pop(n: Int = 1): Unit = {
@@ -196,6 +210,10 @@ abstract class ProverStdIO(uniqueId: String,
     pushPopScopeDepth -= n
     writeLine(cmd)
     readSuccess()
+    /* Declarations are global (see the prover config), hence only assertions are popped */
+    val popped = scopedCommands.takeRight(n).flatten.filterNot(_.startsWith("(assert"))
+    scopedCommands = scopedCommands.dropRight(n)
+    scopedCommands.last ++= popped
   }
 
   def emit(content: String): Unit = {
@@ -204,6 +222,7 @@ abstract class ProverStdIO(uniqueId: String,
     }
     writeLine(content)
     readSuccess()
+    scopedCommands.last += content
   }
 
   def getAllEmits() : Seq[String] = allEmits
@@ -240,8 +259,10 @@ abstract class ProverStdIO(uniqueId: String,
   def assume(term: String): Unit = {
 //    bookkeeper.assumptionCounter += 1
 
-    writeLine("(assert " + term + ")")
+    val cmd = "(assert " + term + ")"
+    writeLine(cmd)
     readSuccess()
+    scopedCommands.last += cmd
   }
 
   def assert(goal: Term, timeout: Option[Int] = None): Boolean =
@@ -273,7 +294,7 @@ abstract class ProverStdIO(uniqueId: String,
     val result = readUnsat()
     val endTime = System.currentTimeMillis()
 
-    if (!result) {
+    if (!result && !lastCheckRanOutOfMemory) {
       retrieveAndSaveModel()
       retrieveReasonUnknown()
     }
@@ -294,7 +315,7 @@ abstract class ProverStdIO(uniqueId: String,
     this.comment(s"State saturation: $comment")
     setTimeout(Some(timeout))
     writeLine("(check-sat)")
-    readLine()
+    readCheckSatResult()
   }
 
   protected def retrieveAndSaveModel(): Unit = {
@@ -333,15 +354,17 @@ abstract class ProverStdIO(uniqueId: String,
     val guard = fresh("grd", Nil, sorts.Bool)
     val guardApp = App(guard, Nil)
 
-    writeLine(s"(assert (=> $guardApp (not $goal)))")
+    val cmd = s"(assert (=> $guardApp (not $goal)))"
+    writeLine(cmd)
     readSuccess()
+    scopedCommands.last += cmd
 
     val startTime = System.currentTimeMillis()
     writeLine(s"(check-sat $guardApp)")
     val result = readUnsat()
     val endTime = System.currentTimeMillis()
 
-    if (!result) {
+    if (!result && !lastCheckRanOutOfMemory) {
       retrieveAndSaveModel()
     }
 
@@ -353,7 +376,7 @@ abstract class ProverStdIO(uniqueId: String,
 
     writeLine("(check-sat)")
 
-    readLine() match {
+    readCheckSatResult() match {
       case "sat" => Sat
       case "unsat" => Unsat
       case "unknown" => Unknown
@@ -432,13 +455,62 @@ abstract class ProverStdIO(uniqueId: String,
       throw ProverInteractionFailed(uniqueId, s"Unexpected output of prover. Expected 'success' but found: $answer")
   }
 
-  protected def readUnsat(): Boolean = readLine() match {
+  protected def readUnsat(): Boolean = readCheckSatResult() match {
     case "unsat" => true
     case "sat" => false
     case "unknown" => false
 
     case result =>
       throw ProverInteractionFailed(uniqueId, s"Unexpected output of prover while trying to refute an assertion: $result")
+  }
+
+  /* Reads the answer to a (check-sat). If the prover ran out of memory, it is restarted and the answer
+   * is taken to be "unknown"; the caller can tell from [[lastCheckRanOutOfMemory]].
+   */
+  protected def readCheckSatResult(): String = {
+    val result = readLine()
+    lastCheckRanOutOfMemory = result.startsWith("(error") && result.contains("out of memory")
+
+    if (lastCheckRanOutOfMemory) {
+      restartAfterMemoryOut()
+      "unknown"
+    } else {
+      result
+    }
+  }
+
+  /* Z3 exits after running out of memory (see its option memory_max_size). Restart the prover and
+   * replay the commands that make up its current state, so that verification can continue.
+   */
+  protected def restartAfterMemoryOut(): Unit = {
+    val msg = s"Prover $uniqueId ran out of memory, restarting it"
+    reporter report InternalWarningMessage(msg)
+    logger warn msg
+    comment(msg)
+
+    prover.destroyForcibly()
+    prover.waitFor(10, TimeUnit.SECONDS)
+    input.close()
+    output.close()
+    prover = createProverInstance(userArgs)
+    connectToProver()
+    lastTimeout = -1
+
+    /* The replayed commands are not logged again */
+    comment(s"Replaying the prover state (${scopedCommands.length - 1} scopes)")
+    scopedCommands.zipWithIndex foreach { case (commands, depth) =>
+      if (depth > 0) {
+        output.println("(push)")
+        readSuccess()
+      }
+      commands foreach { command =>
+        output.println(command)
+        readSuccess()
+      }
+    }
+
+    lastModel = null
+    lastReasonUnknown = "out of memory"
   }
 
   protected def readModel(separator: String): String = {
@@ -513,6 +585,8 @@ abstract class ProverStdIO(uniqueId: String,
   override def getModel(): Model = Model(lastModel)
 
   override def getReasonUnknown(): String = lastReasonUnknown
+
+  override def ranOutOfMemory(): Boolean = lastCheckRanOutOfMemory
 
   override def clearLastAssert(): Unit = {
     lastReasonUnknown = null

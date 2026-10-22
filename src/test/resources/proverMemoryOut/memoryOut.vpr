@@ -1,0 +1,30 @@
+// Any copyright is dedicated to the Public Domain.
+// http://creativecommons.org/publicdomain/zero/1.0/
+
+// The axiom is a matching loop, so the prover runs out of memory when asked to prove
+// something it cannot prove.
+domain Loop {
+  function g(x: Int): Int
+
+  axiom blowup {
+    forall x: Int :: {g(x)} g(x + 1) == g(x) + 1 && g(2 * x) == g(x) + g(x)
+  }
+}
+
+method before(x: Int)
+  requires x > 0
+{
+  assert x >= 1
+}
+
+method blowsUp()
+{
+  assert g(0) == 7
+}
+
+method after(x: Int)
+  requires x > 0
+{
+  assert x >= 1
+  assert x >= 2
+}

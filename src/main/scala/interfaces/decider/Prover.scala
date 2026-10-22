@@ -51,6 +51,8 @@ trait Prover extends ProverLike with StatefulComponent {
   def isModelValid(): Boolean
   def getModel(): Model
   def getReasonUnknown(): String
+  /* Whether the most recent satisfiability check was abandoned because the prover ran out of memory */
+  def ranOutOfMemory(): Boolean = false
   def clearLastAssert(): Unit
   def name: String
   def minVersion: Version
