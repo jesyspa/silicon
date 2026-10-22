@@ -59,11 +59,6 @@ domain $Seq[E] {
             s0 != Seq_empty() && s1 != Seq_empty() && Seq_length(s0) <= n && n < Seq_length(Seq_append(s0, s1)) ==> Seq_add(Seq_sub(n, Seq_length(s0)), Seq_length(s0)) == n &&
             Seq_index(Seq_append(s0, s1), n) == Seq_index(s1, Seq_sub(n, Seq_length(s0)))
     }
-    axiom Seq_append_index3 {
-        forall s0: $Seq[E], s1: $Seq[E], m: Int :: { Seq_index(s1, m), Seq_append(s0, s1) }
-            s0 != Seq_empty() && s1 != Seq_empty() && s0 != Seq_append(s0, s1) && s1 != Seq_append(s0, s1) && 0 <= m && m < Seq_length(s1) ==> Seq_sub(Seq_add(m, Seq_length(s0)), Seq_length(s0)) == m
-            && Seq_index(Seq_append(s0, s1), Seq_add(m, Seq_length(s0))) == Seq_index(s1, m)
-    }
 
     function Seq_update(s: $Seq[E], i: Int, e: E): $Seq[E]
     axiom Seq_update_length {
@@ -109,11 +104,6 @@ domain $Seq[E] {
         forall s: $Seq[E], n: Int, j: Int :: { Seq_index(Seq_drop(s, n), j) }
             0 < n && 0 <= j && j < Seq_length(s) - n ==>
                 Seq_sub(Seq_add(j, n), n) == j && Seq_index(Seq_drop(s, n), j) == Seq_index(s, Seq_add(j, n))
-    }
-    axiom Seq_drop_index2 {
-        forall s: $Seq[E], n: Int, i: Int :: { Seq_drop(s, n), Seq_index(s, i) }
-            0 < n && n <= i && i < Seq_length(s) ==>
-            Seq_add(Seq_sub(i, n), n) == i && Seq_index(Seq_drop(s, n), Seq_sub(i, n)) == Seq_index(s, i)
     }
     axiom Seq_append_take1 {
         forall s: $Seq[E], t: $Seq[E], n: Int ::
