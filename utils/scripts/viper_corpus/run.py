@@ -132,23 +132,46 @@ def build_runner(args):
     return target
 
 
+def process_cgroup(pid):
+    return Path('/sys/fs/cgroup' + Path(f'/proc/{pid}/cgroup').read_text().split(':', 2)[2].strip())
+
+
+def oom_kills(cgroup):
+    for line in (cgroup / 'memory.events').read_text().splitlines():
+        key, value = line.split()
+        if key == 'oom_kill':
+            return int(value)
+    raise OSError('memory.events lacks oom_kill: ' + str(cgroup))
+
+
 class Lane:
-    """One long-lived WarmRunner; restarted after it dies, hangs, or hits an Error."""
+    """One long-lived WarmRunner in its own memory-limited scope.
+
+    The runner is restarted after it dies, hangs, hits an Error, or the kernel
+    OOM-kills a process (in practice Z3) in its scope.
+    """
 
     def __init__(self, args, index, runner):
         self.args, self.index, self.runner = args, index, runner
         self.process, self.starts, self.served = None, 0, 0
 
+    def scope(self):
+        # OOMPolicy=continue keeps the runner alive when the kernel kills its Z3.
+        return ['systemd-run', '--user', '--scope', '--quiet', '-p', 'OOMPolicy=continue',
+                '-p', 'MemoryMax=' + self.args.lane_memory_max, '-p', 'MemorySwapMax=0', '--']
+
     def start(self):
         stderr = (self.args.output_directory / f'runner-{self.index}.log').open('ab')
         self.process = subprocess.Popen(
-            [str(self.args.java), *self.args.jvm_arg, '-XX:+ExitOnOutOfMemoryError',
-             '-cp', f'{self.runner}:{self.args.jar}', 'WarmRunner'],
+            [*self.scope(), str(self.args.java), *self.args.jvm_arg,
+             '-XX:+ExitOnOutOfMemoryError', '-cp', f'{self.runner}:{self.args.jar}', 'WarmRunner'],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr, start_new_session=True)
         stderr.close()
         self.starts, self.served = self.starts + 1, 0
         if self.read(60) != {'ready': True}:
             raise OSError('warm runner did not start; see ' + stderr.name)
+        # systemd-run executes the runner in place, so the scope is the runner's cgroup.
+        self.cgroup = process_cgroup(self.process.pid)
 
     def read(self, timeout):
         """Return the next response, {} if the runner exited, or None after the timeout."""
@@ -178,19 +201,28 @@ class Lane:
         context = dict(lane=self.index, runner_start=self.starts, runner_served=self.served,
                        after_restart=self.starts > 1)
         self.served += 1
+        kills = oom_kills(self.cgroup)
         try:
             self.process.stdin.write(('\t'.join([str(log), *options]) + '\n').encode())
             self.process.stdin.flush()
         except BrokenPipeError:
             pass
         response = self.read(self.args.timeout + HANG_GRACE_S)
+        try:
+            killed = oom_kills(self.cgroup) > kills
+        except FileNotFoundError:  # systemd removed the scope of a dead runner
+            killed = False
         if response:
-            if response['fatal']:
+            if response['fatal'] or killed:
                 self.stop()
-            return response, None, context
-        hung = response is None
+            return response, 'oom' if killed else None, context
+        hung = response is None and not killed
         code = self.stop()
-        return None, 'timeout' if hung else 'oom' if code == OOM_EXIT else 'crash', context
+        # A SIGKILL we did not send is the OOM killer choosing the runner over its
+        # solver; the scope, and with it memory.events, is then already gone.
+        oom = killed or code in (OOM_EXIT, -signal.SIGKILL)
+        failure = 'timeout' if hung else 'oom' if oom else 'crash'
+        return None, failure, context
 
 
 def run_warm_once(row, args, lane):
@@ -243,7 +275,8 @@ def execute(args, rows):
             if value is not None:
                 config[option] = value
         if args.warm:
-            config.update(mode='warm', warm_runs=args.warm_runs)
+            config.update(mode='warm', warm_runs=args.warm_runs,
+                          lane_memory_max=args.lane_memory_max)
         config_path = args.output_directory / 'run.json'
         if config_path.exists():
             if json.loads(config_path.read_text()) != config:
@@ -308,6 +341,8 @@ def main(argv=None):
                         help='verify in one long-lived JVM per job instead of cgroup-isolated processes')
     parser.add_argument('--warm-runs', type=int, default=1,
                         help='verifications per file in --warm mode; the last is measured')
+    parser.add_argument('--lane-memory-max', default='7G',
+                        help='systemd MemoryMax of each --warm runner scope, including its solvers')
     args = parser.parse_args(argv)
     if args.warm != (args.cgroup_root is None):
         parser.error('use exactly one of --warm and --cgroup-root')

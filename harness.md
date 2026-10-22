@@ -76,14 +76,14 @@ After an interruption, an incomplete final JSONL line is truncated and rerun. Co
 
 ## Warm JVM mode
 
-A cold JVM spends much of a small file's CPU on JIT compilation. `--warm` instead keeps one long-lived `WarmRunner` JVM per job. Each input gets a fresh Silicon frontend in that JVM, limited by Silicon's own `--timeout`. No cgroup is needed, so omit `--cgroup-root`; pin CPUs by running the harness under `taskset`, and bound memory with a systemd scope if needed:
+A cold JVM spends much of a small file's CPU on JIT compilation. `--warm` instead keeps one long-lived `WarmRunner` JVM per job. Each input gets a fresh Silicon frontend in that JVM, limited by Silicon's own `--timeout`. Omit `--cgroup-root`. Each runner gets its own `systemd-run --user` scope with `MemoryMax=--lane-memory-max` (default `7G`), `MemorySwapMax=0`, and `OOMPolicy=continue`, so one runaway Z3 cannot starve the other lanes. Budget `--jobs` times the lane limit. Pin CPUs by running the harness under `taskset`:
 
 ```sh
-systemd-run --user --scope -p MemoryMax=12G \
-  taskset -c 2,3,10,11 python3 utils/scripts/viper_corpus/run.py \
+taskset -c 2,3,10,11 python3 utils/scripts/viper_corpus/run.py \
   --corpus-root "$CORPUS" --manifest "$BENCH/quick.jsonl" \
   --jar /absolute/path/to/silicon.jar --java /absolute/path/to/java --z3 /absolute/path/to/z3 \
-  --output-directory "$BENCH/warm-quick" --jobs 2 --timeout 300 --jvm-arg=-Xmx5g \
+  --output-directory "$BENCH/warm-quick" --jobs 2 --timeout 300 --jvm-arg=-Xmx4g \
+  --lane-memory-max 6G \
   --warm --warm-runs 2
 ```
 
@@ -98,7 +98,7 @@ Results add these fields:
 - `lane`, `runner_start`, `runner_served`, `after_restart`: the job slot, its runner start count, the number of files this runner verified before, and whether the runner has been restarted.
 - `warmup`: the same fields for earlier `--warm-runs` verifications. The top-level fields describe the last run.
 
-The JVM runs with `-XX:+ExitOnOutOfMemoryError`. The harness restarts a runner that dies or reports a fatal `Error`, and also one that gives no answer within the timeout plus 30 s, which it then kills with its process group. A runner that dies with exit status 3 makes the file's outcome `oom`, a runner with no answer gives `timeout`, and other deaths give `crash`. Other outcomes come from the log as in cold mode.
+The JVM runs with `-XX:+ExitOnOutOfMemoryError`. The harness restarts a runner after a fatal `Error`, after an OOM kill in its scope, and after it dies. It also restarts a runner that gives no answer within the timeout plus 30 s, killing it with its process group first. A file's outcome is `oom` when the scope's `memory.events` `oom_kill` count rises during the request. This is usually Z3, and the runner survives it. The outcome is also `oom` when the runner exits with status 3 (heap exhaustion) or is killed by a SIGKILL the harness did not send. In that last case the kernel chose the JVM, and its scope is already gone. A runner with no answer gives `timeout`, and other deaths give `crash`. Other outcomes come from the log as in cold mode.
 
 Results stay comparable with `compare.py`. Warm and cold outcomes can differ where stack depth matters. JIT-compiled frames are smaller, so a file that overflows the stack in a cold JVM can verify in a warm one. Solver memory limits need cgroups and are rejected with `--warm`.
 

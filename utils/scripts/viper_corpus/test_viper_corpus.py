@@ -178,7 +178,9 @@ class CorpusTests(unittest.TestCase):
     def test_warm_lane_classifies_restarts_and_keeps_warmup(self):
         # A fake JVM: behaviour is chosen by the input name; 'hang' sleeps past the deadline.
         java = self.root / 'java'
-        java.write_text('#!' + sys.executable + '\n' + '''
+        events = self.root / 'memory.events'
+        events.write_text('oom 0\noom_kill 0\n')
+        java.write_text('#!' + sys.executable + f'\nevents = {str(events)!r}\n' + '''
 import json, os, sys, time
 print(json.dumps(dict(ready=True)), flush=True)
 for line in sys.stdin:
@@ -187,6 +189,10 @@ for line in sys.stdin:
     if name == 'oom.vpr': sys.exit(3)
     if name == 'hang.vpr': time.sleep(60)
     if name == 'die.vpr': sys.exit(1)
+    if name.startswith('z3oom'):  # the kernel killed a solver; the runner survives
+        kills = int(open(events).read().split()[-1]) + 1
+        open(events, 'w').write(f'oom {kills}\\noom_kill {kills}\\n')
+        if name == 'z3oom-hang.vpr': time.sleep(60)
     open(log, 'w').write('Silicon found 1 error' if name == 'bad.vpr' else 'ok')
     print(json.dumps(dict(success=name == 'a.vpr', wall_s=0.5, jvm_cpu_ticks=200,
                           children_cpu_ticks=100, heap_after_gc_bytes=7,
@@ -197,16 +203,25 @@ for line in sys.stdin:
         args.java, args.warm, args.jobs, args.timeout = java, True, 1, 1
         run.HANG_GRACE_S = 0.5
         self.addCleanup(setattr, run, 'HANG_GRACE_S', 30)
-        names = ['a', 'bad', 'oom', 'a', 'hang', 'fatal', 'a', 'die', 'a']
+        scope = patch.object(run.Lane, 'scope', return_value=[])
+        cgroup = patch.object(run, 'process_cgroup', return_value=self.root)
+        scope.start(), cgroup.start()
+        self.addCleanup(scope.stop)
+        self.addCleanup(cgroup.stop)
+        names = ['a', 'bad', 'oom', 'a', 'hang', 'fatal', 'a', 'die', 'a', 'z3oom', 'a',
+                 'z3oom-hang', 'a']
         rows = [dict(rows[0], path=f'A/{i}/{n}.vpr') for i, n in enumerate(names)]
         lane = run.Lane(args, 0, java)
         self.addCleanup(lane.stop)
         results = [run.run_warm_once(row, args, lane) for row in rows]
         self.assertEqual([r['outcome'] for r in results],
                          ['verified', 'failed', 'oom', 'verified', 'timeout', 'crash',
-                          'verified', 'crash', 'verified'])
-        self.assertEqual([r['runner_start'] for r in results], [1, 1, 1, 2, 2, 3, 4, 4, 5])
-        self.assertEqual([r['runner_served'] for r in results], [0, 1, 2, 0, 1, 0, 0, 1, 0])
+                          'verified', 'crash', 'verified', 'oom', 'verified', 'oom', 'verified'])
+        self.assertEqual([r['runner_start'] for r in results],
+                         [1, 1, 1, 2, 2, 3, 4, 4, 5, 5, 6, 6, 7])
+        self.assertEqual([r['runner_served'] for r in results],
+                         [0, 1, 2, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0])
+        self.assertEqual(results[9]['wall_s'], 0.5)
         self.assertFalse(results[0]['after_restart'])
         self.assertTrue(results[3]['after_restart'])
         tick = os.sysconf('SC_CLK_TCK')
