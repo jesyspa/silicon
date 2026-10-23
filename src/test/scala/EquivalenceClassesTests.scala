@@ -60,6 +60,24 @@ class EquivalenceClassesTests extends AnyFunSuite {
     assert(found(Seq(reflexive, symmetric, mixed)).isEmpty)
   }
 
+  test("Overloaded predicates cannot borrow laws from another homogeneous signature") {
+    val ri = DomainFun(r.id, Seq(sorts.Int, sorts.Int), sorts.Bool)
+    val xi = Var(x.id, sorts.Int, false)
+    val yi = Var(y.id, sorts.Int, false)
+    val zi = Var(z.id, sorts.Int, false)
+    def ei(a: Term, b: Term): Term = edge(a, b, ri)
+    val intLaws = Seq(
+      all(Seq(xi), ei(xi, xi)),
+      all(Seq(xi, yi), Equals(ei(xi, yi), ei(yi, xi))),
+      all(Seq(xi, yi, zi), Implies(And(ei(xi, yi), ei(yi, zi)), ei(xi, zi))))
+    laws.indices.foreach { i =>
+      val split = laws.patch(i, Nil, 1) :+ intLaws(i)
+      assert(EquivalenceClasses.recognise(Seq(r, ri), split).isEmpty)
+    }
+    assert(EquivalenceClasses.recognise(Seq(r, ri), laws ++ intLaws) == Set(r, ri))
+    assert(found(Seq(all(Seq(xi), edge(x, x)), symmetric, transitive)).isEmpty)
+  }
+
   test("Reversed join order and implication symmetry remain unconditional laws") {
     val reversed = all(Seq(x, y, z), Implies(And(edge(y, z), edge(x, y)), edge(x, z)))
     val symmetry = all(Seq(x, y), Implies(edge(x, y), edge(y, x)))
