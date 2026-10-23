@@ -47,6 +47,8 @@ class Z3ProverStdIO(uniqueId: String,
   private var reducedBudget = false
   private var lastResourceBudget = -1
   private var internalBudgetScope = false
+  private var currentPurpose = "obligation"
+  private val queryTrace = java.lang.Boolean.getBoolean("silicon.queryTrace")
   private val queryCounters = java.lang.Boolean.getBoolean("silicon.queryCounters")
   private val queryResources = java.lang.Boolean.getBoolean("silicon.queryResources")
   private val totals = scala.collection.mutable.Map.empty[String, (Long, Long, Long, Long)]
@@ -55,16 +57,25 @@ class Z3ProverStdIO(uniqueId: String,
     progressCounts.clear()
     reducedBudget = false
     internalBudgetScope = false
+    currentPurpose = "obligation"
     lastResourceBudget = -1
     totals.clear()
     super.start(userArgsString)
   }
 
   override protected def assertUsingPushPop(goal: String, timeout: Option[Int]): (Boolean, Long) = {
+    if (internalBudgetScope) {
+      val count = progressCounts.getOrElse(currentPurpose, 0L) + 1
+      progressCounts(currentPurpose) = count
+      reducedBudget = currentPurpose != "semantic" && count > progressWarmup && internalResources > 0 &&
+        !(progressPeriod > 0 && (count - 1) % progressPeriod == 0)
+    }
     val before = if (queryResources) statistics().getOrElse("rlimit-count", "0").toLong else 0L
     val result = super.assertUsingPushPop(goal, timeout)
     if (queryCounters) {
       val after = if (queryResources) statistics().getOrElse("rlimit-count", "0").toLong else 0L
+      if (queryTrace)
+        println(s"QueryTrace\t$uniqueId\t$currentPurpose\t$reducedBudget\t${result._1}\t${result._2}\t${after - before}\t${goal.replaceAll("\\s+", " ")}")
       val kind = if (!internalBudgetScope) "obligation" else if (reducedBudget) "cheap" else "full"
       val (count, proved, millis, resources) = totals.getOrElse(kind, (0L, 0L, 0L, 0L))
       totals(kind) = (count + 1, proved + (if (result._1) 1 else 0),
@@ -83,17 +94,15 @@ class Z3ProverStdIO(uniqueId: String,
   // Keep every incremental query. Periodic full probes explicitly provide search
   // progress; an unsuccessful probe is never cached as a logical answer.
   def withInternalBudget[T](purpose: String)(body: => T): T = {
-    val internalChecks = progressCounts.getOrElse(purpose, 0L) + 1
-    progressCounts(purpose) = internalChecks
-    val eligible = purpose != "semantic"
     val previous = reducedBudget
     val previousScope = internalBudgetScope
+    val previousPurpose = currentPurpose
     internalBudgetScope = true
-    reducedBudget = eligible && internalChecks > progressWarmup && internalResources > 0 &&
-      !(progressPeriod > 0 && (internalChecks - 1) % progressPeriod == 0)
+    currentPurpose = purpose
     try body finally {
       reducedBudget = previous
       internalBudgetScope = previousScope
+      currentPurpose = previousPurpose
     }
   }
 

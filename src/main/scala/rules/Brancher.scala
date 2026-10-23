@@ -71,6 +71,9 @@ object brancher extends BranchingRules {
       || skipPathFeasibilityCheck
       || !v.decider.checkBranch(condition, Verifier.config.checkTimeout()))
 
+    if (java.lang.Boolean.getBoolean("silicon.queryTrace"))
+      println(s"BranchTrace\t$skipPathFeasibilityCheck\t$executeThenBranch\t$executeElseBranch")
+
     val parallelizeElseBranch = s.parallelizeBranches && executeThenBranch && executeElseBranch
 
 //    val additionalPaths =
