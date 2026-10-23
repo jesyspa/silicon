@@ -40,6 +40,23 @@ class TermToSMTLib2ConverterTests extends AnyFunSuite {
     assert(occurrences(rendered, "$Perm.min") == 30)
   }
 
+  test("The size precheck counts unfolded DAG occurrences and saturates before overflow") {
+    // Only 162 distinct nodes, but more than Long.MaxValue unfolded occurrences.
+    val rendered = termConverter.convert(nested(p, 80))
+    assert(rendered.startsWith("(let ("))
+    assert(occurrences(rendered, "$Perm.min") == 80)
+  }
+
+  test("The size precheck preserves structural sharing of distinct equal terms") {
+    val left = nested(p, 13)
+    val right = nested(p, 13)
+    assert(left ne right)
+    val shared = termConverter.convert(PermPlus(left, left))
+    val copied = termConverter.convert(PermPlus(left, right))
+    assert(shared.startsWith("(let ("))
+    assert(copied == shared)
+  }
+
   test("Subterms with bound variables are not shared across their binder") {
     val big = nested(p, 12)
     val body = PermLess(nested(Var(Identifier("x"), sorts.Perm, false), 12), big)

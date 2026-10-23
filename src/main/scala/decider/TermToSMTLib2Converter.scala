@@ -648,11 +648,33 @@ private object SharingAnalysis {
     case _ => true
   }
 
+  /* A bounded identity traversal can rule out small trees without structural hashing or equality.
+   * Counting all syntactic children, including rendering leaves, is an upper bound on the sharing
+   * analysis's tree size. In particular, mutable aliases cannot make this bound too small.
+   * Memo entries hold unfolded subtree sizes, not visited flags: each incoming edge adds the
+   * cached size again. Thus size(t) = min(minTreeSize, 1 + sum(size(child))) even for shared DAGs.
+   */
+  private def mayHaveLargeTree(root: Term): Boolean = {
+    val sizes = new java.util.IdentityHashMap[Term, java.lang.Integer]()
+    def size(t: Term): Int = {
+      val cached = sizes.get(t)
+      if (cached != null) return cached.intValue()
+      var total = 1
+      val children = viper.silicon.state.utils.subterms(t).iterator
+      while (children.hasNext && total < minTreeSize) {
+        total = math.min(minTreeSize, total + size(children.next()))
+      }
+      sizes.put(t, total)
+      total
+    }
+    size(root) >= minTreeSize
+  }
+
   /** Returns None if the term should be rendered without sharing, and otherwise the bound subterms and, for each
     * binding level, the subterms bound on that level, in an order in which subterms precede their superterms.
     */
   def analyse(root: Term): Option[(java.util.HashMap[Term, SharingInfo], Array[mutable.ArrayBuffer[Term]])] = {
-    if (!isShareable(root)) return None
+    if (!isShareable(root) || !mayHaveLargeTree(root)) return None
 
     val infos = new java.util.HashMap[Term, SharingInfo]()
     val postOrder = mutable.ArrayBuffer.empty[Term]
