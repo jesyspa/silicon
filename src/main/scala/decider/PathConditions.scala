@@ -91,12 +91,12 @@ private class PathConditionStackLayer
 
   private var _branchCondition: Option[Term] = None
   private var _branchConditionExp: Option[(ast.Exp, Option[ast.Exp])] = None
-  private var _globalAssumptions: InsertionOrderedSet[Term] = InsertionOrderedSet.empty
-  private var _nonGlobalAssumptions: InsertionOrderedSet[Term] = InsertionOrderedSet.empty
+  private var _globalAssumptions: InsertionOrderedSet[Term] = PathConditionIndex.empty
+  private var _nonGlobalAssumptions: InsertionOrderedSet[Term] = PathConditionIndex.empty
   private var _globalAssumptionDebugExps: InsertionOrderedSet[DebugExp] = InsertionOrderedSet.empty
   private var _nonGlobalAssumptionDebugExps: InsertionOrderedSet[DebugExp] = InsertionOrderedSet.empty
-  private var _globalDefiningAssumptions: InsertionOrderedSet[Term] = InsertionOrderedSet.empty
-  private var _nonGlobalDefiningAssumptions: InsertionOrderedSet[Term] = InsertionOrderedSet.empty
+  private var _globalDefiningAssumptions: InsertionOrderedSet[Term] = PathConditionIndex.empty
+  private var _nonGlobalDefiningAssumptions: InsertionOrderedSet[Term] = PathConditionIndex.empty
   private var _globalDefiningAssumptionDebugExps: InsertionOrderedSet[DebugExp] = InsertionOrderedSet.empty
   private var _nonGlobalDefiningAssumptionDebugExps: InsertionOrderedSet[DebugExp] = InsertionOrderedSet.empty
   private var _declarations: InsertionOrderedSet[Decl] = InsertionOrderedSet.empty
@@ -261,7 +261,7 @@ private trait LayeredPathConditionStackLike {
     layers.flatMap(_.branchConditionExp)
 
   protected def assumptions(layers: Stack[PathConditionStackLayer]): InsertionOrderedSet[Term] =
-    InsertionOrderedSet(layers.flatMap(_.assumptions)) // Note: Performance?
+    PathConditionIndex.from(layers.flatMap(_.assumptions)) // Note: Performance?
 
   /* The non-global debug expressions of each layer, including the still-open sub-expressions that were
    * added in that layer. */
@@ -276,7 +276,7 @@ private trait LayeredPathConditionStackLike {
   protected def assumptionExps(layers: Stack[PathConditionStackLayer]): InsertionOrderedSet[DebugExp] =
     InsertionOrderedSet(layers.flatMap(_.globalAssumptionDebugExps) ++ nonGlobalDebugExps(layers).flatten) // Note: Performance?
   protected def definingAssumptions(layers: Stack[PathConditionStackLayer]): InsertionOrderedSet[Term] =
-    InsertionOrderedSet(layers.flatMap(_.globalDefiningAssumptions) ++ layers.flatMap(_.nonGlobalDefiningAssumptions)) // Note: Performance?
+    PathConditionIndex.from(layers.flatMap(_.globalDefiningAssumptions) ++ layers.flatMap(_.nonGlobalDefiningAssumptions)) // Note: Performance?
 
   protected def definingAssumptionExps(layers: Stack[PathConditionStackLayer]): InsertionOrderedSet[DebugExp] =
     InsertionOrderedSet(layers.flatMap(_.globalDefiningAssumptionDebugExps) ++ layers.flatMap(_.nonGlobalDefiningAssumptionDebugExps))
@@ -475,7 +475,7 @@ private[decider] class LayeredPathConditionStack
   private var markCounter = new Counter(0)
 
   /* Set of assumptions across all layers. Maintained separately to improve performance. */
-  private var allAssumptions = InsertionOrderedSet.empty[Term]
+  private var allAssumptions = PathConditionIndex.empty
 
   pushScope() /* Create an initial layer on the stack */
 
@@ -597,7 +597,7 @@ private[decider] class LayeredPathConditionStack
     InsertionOrderedSet(layers.flatMap(_.declarations)) // Note: Performance?
 
   def definingAssumptions: InsertionOrderedSet[Term] =
-    InsertionOrderedSet(layers.flatMap(_.globalDefiningAssumptions) ++ layers.flatMap(_.nonGlobalDefiningAssumptions)) // Note: Performance?
+    PathConditionIndex.from(layers.flatMap(_.globalDefiningAssumptions) ++ layers.flatMap(_.nonGlobalDefiningAssumptions)) // Note: Performance?
 
   def contains(assumption: Term): Boolean = allAssumptions.contains(assumption)
 
@@ -663,7 +663,7 @@ private[decider] class LayeredPathConditionStack
   override def definitionsOnly: RecordedPathConditions = {
     val result = duplicate()
     result.layers = layers map (_.definitionsOnly())
-    result.allAssumptions = InsertionOrderedSet(layers.flatMap(_.globalDefiningAssumptions) ++
+    result.allAssumptions = PathConditionIndex.from(layers.flatMap(_.globalDefiningAssumptions) ++
       layers.flatMap(_.nonGlobalDefiningAssumptions))
     result
   }
