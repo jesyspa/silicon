@@ -648,11 +648,56 @@ private object SharingAnalysis {
     case _ => true
   }
 
+  /* Without mutable aliases, structurally equal terms have equal unfolded sizes under isShareable's
+   * leaf boundaries. Identity memoization therefore computes the same size as visit, saturated at
+   * minTreeSize, counting the cached size once per incoming edge (not once per identity).
+   * Alias state is not part of structural equality: equal parents can hide differently aliased
+   * children. On encountering an alias we conservatively defer to visit instead of undercounting
+   * a subtree whose structural representative might be unaliased. We never descend into aliases
+   * or binders. A saturated subtree or minTreeSize-deep path already proves the root large enough.
+   */
+  private[decider] def mayHaveLargeTree(root: Term): Boolean = {
+    final class Frame(val term: Term) {
+      val children: Iterator[Term] = viper.silicon.state.utils.subterms(term).iterator
+      var size: Int = 1
+    }
+    val sizes = new java.util.IdentityHashMap[Term, java.lang.Integer]()
+    val stack = new java.util.ArrayDeque[Frame]()
+    if (!isShareable(root)) return false
+    stack.push(new Frame(root))
+    while (!stack.isEmpty) {
+      val frame = stack.peek()
+      if (frame.children.hasNext) {
+        val child = frame.children.next()
+        child match {
+          case hvr: HasVarRepr if hvr.varRepr.isDefined => return true
+          case _ =>
+        }
+        val cached = sizes.get(child)
+        if (!isShareable(child)) frame.size += 1
+        else if (cached != null) frame.size = math.min(minTreeSize, frame.size + cached.intValue())
+        else {
+          if (stack.size() >= minTreeSize - 1) return true
+          stack.push(new Frame(child))
+        }
+      } else {
+        sizes.put(frame.term, frame.size)
+        stack.pop()
+        if (!stack.isEmpty) {
+          val parent = stack.peek()
+          parent.size = math.min(minTreeSize, parent.size + frame.size)
+        }
+      }
+      if (!stack.isEmpty && stack.peek().size >= minTreeSize) return true
+    }
+    false
+  }
+
   /** Returns None if the term should be rendered without sharing, and otherwise the bound subterms and, for each
     * binding level, the subterms bound on that level, in an order in which subterms precede their superterms.
     */
   def analyse(root: Term): Option[(java.util.HashMap[Term, SharingInfo], Array[mutable.ArrayBuffer[Term]])] = {
-    if (!isShareable(root)) return None
+    if (!isShareable(root) || !mayHaveLargeTree(root)) return None
 
     val infos = new java.util.HashMap[Term, SharingInfo]()
     val postOrder = mutable.ArrayBuffer.empty[Term]
