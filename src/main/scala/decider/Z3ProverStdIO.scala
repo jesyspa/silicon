@@ -42,7 +42,8 @@ class Z3ProverStdIO(uniqueId: String,
 
   private val internalResources = Integer.getInteger("silicon.internalResources", 0).intValue
   private val progressPeriod = Integer.getInteger("silicon.progressPeriod", 0).intValue
-  private var internalChecks = 0L
+  private val progressWarmup = Integer.getInteger("silicon.progressWarmup", 32).intValue
+  private val progressCounts = scala.collection.mutable.Map.empty[String, Long]
   private var reducedBudget = false
   private var lastResourceBudget = -1
   private var internalBudgetScope = false
@@ -51,7 +52,7 @@ class Z3ProverStdIO(uniqueId: String,
   private val totals = scala.collection.mutable.Map.empty[String, (Long, Long, Long, Long)]
 
   override def start(userArgsString: Option[String]): Unit = {
-    internalChecks = 0L
+    progressCounts.clear()
     reducedBudget = false
     internalBudgetScope = false
     lastResourceBudget = -1
@@ -75,17 +76,20 @@ class Z3ProverStdIO(uniqueId: String,
   override def stop(): Unit = {
     if (queryCounters && totals.nonEmpty)
       println(s"Query work $uniqueId: ${totals.toSeq.sortBy(_._1).mkString("; ")}")
+    totals.clear()
     super.stop()
   }
 
   // Keep every incremental query. Periodic full probes explicitly provide search
   // progress; an unsuccessful probe is never cached as a logical answer.
-  def withInternalBudget[T](eligible: Boolean)(body: => T): T = {
-    internalChecks += 1
+  def withInternalBudget[T](purpose: String)(body: => T): T = {
+    val internalChecks = progressCounts.getOrElse(purpose, 0L) + 1
+    progressCounts(purpose) = internalChecks
+    val eligible = purpose != "semantic"
     val previous = reducedBudget
     val previousScope = internalBudgetScope
     internalBudgetScope = true
-    reducedBudget = eligible && internalResources > 0 &&
+    reducedBudget = eligible && internalChecks > progressWarmup && internalResources > 0 &&
       !(progressPeriod > 0 && (internalChecks - 1) % progressPeriod == 0)
     try body finally {
       reducedBudget = previous

@@ -380,14 +380,17 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
       prover.check(timeout) == Unsat
     }
 
-    def check(t: Term, timeout: Int): Boolean =
-      internalCheck(t, timeout, t == False || pcs.assumptions.contains(Not(t)))
+    def check(t: Term, timeout: Int): Boolean = internalCheck(t, timeout, feasibility = false)
 
-    override def checkBranch(t: Term, timeout: Int): Boolean = internalCheck(t, timeout, eligible = true)
+    override def checkBranch(t: Term, timeout: Int): Boolean = internalCheck(t, timeout, feasibility = true)
 
-    private def internalCheck(t: Term, timeout: Int, eligible: Boolean): Boolean = prover match {
-      case z3: Z3ProverStdIO => z3.withInternalBudget(eligible) { deciderAssert(t, Some(timeout)) }
-      case _ => deciderAssert(t, Some(timeout))
+    private def internalCheck(t: Term, timeout: Int, feasibility: Boolean): Boolean = {
+      val purpose = if (t == False || pcs.assumptions.contains(Not(t))) "consistency"
+        else if (feasibility) "feasibility" else "semantic"
+      prover match {
+        case z3: Z3ProverStdIO => z3.withInternalBudget(purpose) { deciderAssert(t, Some(timeout)) }
+        case _ => deciderAssert(t, Some(timeout))
+      }
     }
 
     def assert(t: Term, timeout: Option[Int] = Verifier.config.assertTimeout.toOption)
