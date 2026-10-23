@@ -14,7 +14,7 @@ import org.rogach.scallop._
 import viper.silicon.Config.JoinMode.JoinMode
 import viper.silicon.Config.StateConsolidationMode.StateConsolidationMode
 import viper.silicon.decider.{Cvc5ProverStdIO, Z3ProverAPI, Z3ProverStdIO}
-import viper.silver.frontend.SilFrontendConfig
+import viper.silver.frontend.{NativeModel, SilFrontendConfig}
 
 class Config(args: Seq[String]) extends SilFrontendConfig(args, "Silicon") {
   import Config._
@@ -758,6 +758,12 @@ class Config(args: Seq[String]) extends SilFrontendConfig(args, "Silicon") {
   validateOpt(equivalenceClasses, prover) {
     case (Some(true), Some(p)) if p != Z3ProverStdIO.name =>
       Left("equivalenceClasses currently supports only Z3 StdIO; other backend trigger expansion is unaudited")
+    case _ => Right(())
+  }
+
+  validateOpt(equivalenceClasses, counterexample) {
+    case (Some(true), Some(mode)) if mode != NativeModel =>
+      Left("equivalenceClasses supports only native counterexamples; reconstructed classifier interpretations are unsupported")
     case _ => Right(())
   }
 

@@ -4,6 +4,7 @@
 
 package viper.silicon.supporters
 
+import viper.silver.ast
 import viper.silicon.state.Identifier
 import viper.silicon.state.terms._
 
@@ -14,6 +15,24 @@ import viper.silicon.state.terms._
   */
 object EquivalenceClasses {
   case class Encoding(relation: DomainFun, classSort: Sort, classifier: Fun, definition: MacroDecl)
+
+  /** Refuse state/substitution wrappers anywhere in a trigger, including around
+    * the application. Extensions have no audited normalization contract.
+    * Relation arguments are restricted to local variables: collection desugaring
+    * and interpreted applications can also make source-distinct terms identical.
+    * This is conservative, not a guarantee of E-matching completeness.
+    */
+  def unsupportedTriggerApplications(trigger: ast.Trigger): Seq[ast.DomainFuncApp] = {
+    val normalizationSensitive = trigger.exists {
+      case _: ast.OldExp | _: ast.Let | _: ast.Unfolding | _: ast.Applying | _: ast.ExtensionExp => true
+      case _ => false
+    }
+    trigger.deepCollect {
+      case a: ast.DomainFuncApp if normalizationSensitive ||
+          a.args.exists(!_.isInstanceOf[ast.LocalVar]) ||
+          (a.args.size == 2 && a.args.head == a.args(1)) => a
+    }
+  }
 
   private def conjuncts(t: Term): Seq[Term] = t match {
     case a: And => a.ts.flatMap(conjuncts)

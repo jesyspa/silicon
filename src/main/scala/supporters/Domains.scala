@@ -63,16 +63,15 @@ class DefaultDomainsContributor(symbolConverter: SymbolConverter,
     collectDomainMembers(instantiatedDomains, program)
     if (equivalenceClasses) {
       val recognised = EquivalenceClasses.recognise(collectedFunctions, collectedAxioms)
-      // A diagonal relation pattern expands to a reflexive equality. Z3 can
-      // simplify it away and lose useful instantiations of unrelated formulas.
-      val diagonal = program.deepCollect { case t: ast.Trigger =>
-        t.deepCollect {
-          case a: ast.DomainFuncApp if a.args.size == 2 && a.args.head == a.args(1) =>
-            symbolConverter.toSortSpecificId(a.funcname, Seq(terms.sorts.Bool))
-        }
+      // Source-distinct arguments can become diagonal after old-state evaluation
+      // or substitution. Refuse erasing wrappers rather than treating AST
+      // inequality as evidence that the emitted pattern stays non-diagonal.
+      val unsupported = program.deepCollect { case t: ast.Trigger =>
+        EquivalenceClasses.unsupportedTriggerApplications(t).map(a =>
+          symbolConverter.toSortSpecificId(a.funcname, Seq(terms.sorts.Bool)))
       }.flatten.toSet
-      val rejected = recognised.filter(f => diagonal(f.id))
-      rejected.foreach(f => logger.warn(s"Equivalence-class encoding skipped ${f.id}: diagonal relation trigger is unsupported"))
+      val rejected = recognised.filter(f => unsupported(f.id))
+      rejected.foreach(f => logger.warn(s"Equivalence-class encoding skipped ${f.id}: diagonal or normalization-sensitive relation trigger is unsupported"))
       val relations = recognised -- rejected
       val occupied = collectedFunctions.map(_.id.name).toSet ++ collectedSorts.map(_.toString) ++
         program.deepCollect { case d: ast.Declaration => d.name }

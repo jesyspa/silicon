@@ -84,6 +84,39 @@ class EquivalenceClassesTests extends AnyFunSuite {
     assert(found(Seq(reflexive, symmetry, reversed)) == Set(r))
   }
 
+  test("Trigger refusal covers nested and enclosing normalization wrappers") {
+    import viper.silver.ast
+    val a = ast.LocalVar("a", ast.Ref)()
+    val b = ast.LocalVar("b", ast.Ref)()
+    def rel(x: ast.Exp, y: ast.Exp) = ast.DomainFuncApp("rel", Seq(x, y), Map.empty)(
+      ast.NoPosition, ast.NoInfo, ast.Bool, "Equiv", ast.NoTrafos)
+    def rejected(e: ast.Exp) = EquivalenceClasses.unsupportedTriggerApplications(ast.Trigger(Seq(e))())
+    assert(rejected(rel(a, b)).isEmpty)
+    assert(rejected(rel(a, a)).nonEmpty)
+    assert(rejected(rel(a, ast.Old(a)())).nonEmpty)
+    assert(rejected(rel(a, ast.LabelledOld(a, "entry")())).nonEmpty)
+    assert(rejected(ast.Old(rel(a, b))()).nonEmpty)
+    val nested = ast.DomainFuncApp("wrap", Seq(ast.Old(a)()), Map.empty)(
+      ast.NoPosition, ast.NoInfo, ast.Ref, "Equiv", ast.NoTrafos)
+    assert(rejected(rel(a, nested)).exists(_.funcname == "rel"))
+    val let = ast.Let(ast.LocalVarDecl("b", ast.Ref)(), a, b)()
+    assert(rejected(rel(a, let)).nonEmpty)
+    assert(rejected(rel(a, ast.NullLit()())).nonEmpty)
+    val plainNested = nested.withArgs(Seq(a))
+    assert(rejected(rel(a, plainNested)).exists(_.funcname == "rel"))
+  }
+
+  test("Only native counterexamples are supported with equivalence classes") {
+    def config(mode: String, enabled: Boolean) = new viper.silicon.Config(
+      Seq("--ignoreFile", "--exhaleMode", "1", "--counterexample", mode) ++
+        (if (enabled) Seq("--equivalenceClasses") else Nil) :+ "dummy.vpr")
+    Seq("variables", "mapped", "resolved", "raw").foreach { mode =>
+      assert(config(mode, enabled = true).error.exists(_.contains("only native counterexamples")))
+      assert(config(mode, enabled = false).error.isEmpty)
+    }
+    assert(config("native", enabled = true).error.isEmpty)
+  }
+
   test("Class names avoid occupied symbols and definitions compare classes, not references") {
     val blocked = Set("$equivalence@sort@0", "$equivalence@class@2")
     val enc = EquivalenceClasses.encode(Seq(r, s), blocked)
