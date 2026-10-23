@@ -384,8 +384,19 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
 
     override def checkBranch(t: Term, timeout: Int): Boolean = internalCheck(t, timeout, feasibility = true)
 
+    private def propositional(t: Term): Boolean = t match {
+      case True | False => true
+      case v: Var => v.sort == sorts.Bool
+      case Not(p) => propositional(p)
+      case And(ts) => ts.forall(propositional)
+      case Or(ts) => ts.forall(propositional)
+      case Implies(p, q) => propositional(p) && propositional(q)
+      case _ => false
+    }
+
     private def internalCheck(t: Term, timeout: Int, feasibility: Boolean): Boolean = {
-      val purpose = if (t == False || pcs.assumptions.contains(Not(t))) "consistency"
+      val purpose = if (!propositional(t)) "semantic"
+        else if (t == False || pcs.assumptions.contains(Not(t))) "consistency"
         else if (feasibility) "feasibility" else "semantic"
       prover match {
         case z3: Z3ProverStdIO => z3.withInternalBudget(purpose) { deciderAssert(t, Some(timeout)) }
