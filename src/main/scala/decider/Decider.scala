@@ -379,7 +379,10 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
       prover.check(timeout) == Unsat
     }
 
-    def check(t: Term, timeout: Int): Boolean = deciderAssert(t, Some(timeout))
+    def check(t: Term, timeout: Int): Boolean = prover match {
+      case z3: Z3ProverStdIO => z3.withInternalBudget { deciderAssert(t, Some(timeout)) }
+      case _ => deciderAssert(t, Some(timeout))
+    }
 
     def assert(t: Term, timeout: Option[Int] = Verifier.config.assertTimeout.toOption)
               (Q: Boolean => VerificationResult)
