@@ -69,6 +69,7 @@ trait Decider {
   def assume(terms: Iterable[Term], debugExp: Option[DebugExp], enforceAssumption: Boolean): Unit
 
   def check(t: Term, timeout: Int): Boolean
+  def checkBranch(t: Term, timeout: Int): Boolean = check(t, timeout)
 
   /* TODO: Consider changing assert such that
    *         1. It passes State and Operations to the continuation
@@ -379,8 +380,13 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
       prover.check(timeout) == Unsat
     }
 
-    def check(t: Term, timeout: Int): Boolean = prover match {
-      case z3: Z3ProverStdIO => z3.withInternalBudget { deciderAssert(t, Some(timeout)) }
+    def check(t: Term, timeout: Int): Boolean =
+      internalCheck(t, timeout, t == False || pcs.assumptions.contains(Not(t)))
+
+    override def checkBranch(t: Term, timeout: Int): Boolean = internalCheck(t, timeout, eligible = true)
+
+    private def internalCheck(t: Term, timeout: Int, eligible: Boolean): Boolean = prover match {
+      case z3: Z3ProverStdIO => z3.withInternalBudget(eligible) { deciderAssert(t, Some(timeout)) }
       case _ => deciderAssert(t, Some(timeout))
     }
 

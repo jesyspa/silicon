@@ -80,12 +80,12 @@ class Z3ProverStdIO(uniqueId: String,
 
   // Keep every incremental query. Periodic full probes explicitly provide search
   // progress; an unsuccessful probe is never cached as a logical answer.
-  def withInternalBudget[T](body: => T): T = {
+  def withInternalBudget[T](eligible: Boolean)(body: => T): T = {
     internalChecks += 1
     val previous = reducedBudget
     val previousScope = internalBudgetScope
     internalBudgetScope = true
-    reducedBudget = internalResources > 0 &&
+    reducedBudget = eligible && internalResources > 0 &&
       !(progressPeriod > 0 && (internalChecks - 1) % progressPeriod == 0)
     try body finally {
       reducedBudget = previous
