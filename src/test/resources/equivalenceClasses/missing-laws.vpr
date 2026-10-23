@@ -1,0 +1,30 @@
+domain NoReflexivity {
+  function nr(Ref, Ref): Bool
+  axiom { forall x: Ref, y: Ref :: { nr(x,y) } nr(x,y) == nr(y,x) }
+  axiom { forall x: Ref, y: Ref, z: Ref :: { nr(x,y), nr(y,z) } nr(x,y) && nr(y,z) ==> nr(x,z) }
+}
+domain NoSymmetry {
+  function ns(Ref, Ref): Bool
+  axiom { forall x: Ref, y: Ref :: { ns(x,y) } x == y ==> ns(x,y) }
+  axiom { forall x: Ref, y: Ref, z: Ref :: { ns(x,y), ns(y,z) } ns(x,y) && ns(y,z) ==> ns(x,z) }
+}
+domain NoTransitivity {
+  function nt(Ref, Ref): Bool
+  axiom { forall x: Ref, y: Ref :: { nt(x,y) } (nt(x,y) == nt(y,x)) && (x == y ==> nt(x,y)) }
+}
+method missing_reflexivity(a: Ref) {
+  //:: ExpectedOutput(assert.failed:assertion.false)
+  assert nr(a,a)
+}
+method missing_symmetry(a: Ref, b: Ref)
+  requires ns(a,b)
+{
+  //:: ExpectedOutput(assert.failed:assertion.false)
+  assert ns(b,a)
+}
+method missing_transitivity(a: Ref, b: Ref, c: Ref)
+  requires nt(a,b) && nt(b,c)
+{
+  //:: ExpectedOutput(assert.failed:assertion.false)
+  assert nt(a,c)
+}

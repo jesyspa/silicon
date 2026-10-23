@@ -7,6 +7,7 @@
 package viper.silicon.supporters
 
 import viper.silver.ast
+import com.typesafe.scalalogging.LazyLogging
 import viper.silicon.common.collections.immutable.InsertionOrderedSet
 import viper.silicon.common.collections.immutable.MultiMap._
 import viper.silicon.toMap
@@ -22,13 +23,15 @@ trait DomainsContributor[SO, SY, AX, UA] extends PreambleContributor[SO, SY, AX]
 }
 
 class DefaultDomainsContributor(symbolConverter: SymbolConverter,
-                                domainTranslator: DomainsTranslator[Term])
-    extends DomainsContributor[Sort, DomainFun, Term, Term] {
+                                domainTranslator: DomainsTranslator[Term],
+                                equivalenceClasses: Boolean = false)
+    extends DomainsContributor[Sort, DomainFun, Term, Term] with LazyLogging {
 
   private var collectedSorts = InsertionOrderedSet[Sort]()
   private var collectedFunctions = InsertionOrderedSet[terms.DomainFun]()
   private var collectedAxioms = InsertionOrderedSet[Term]()
   private var uniqueSymbols = MultiMap.empty[Sort, DomainFun]
+  private var equivalences = Seq.empty[EquivalenceClasses.Encoding]
 
   /* Lifetime */
 
@@ -37,6 +40,7 @@ class DefaultDomainsContributor(symbolConverter: SymbolConverter,
     collectedFunctions = collectedFunctions.empty
     collectedAxioms = collectedAxioms.empty
     uniqueSymbols = MultiMap.empty
+    equivalences = Seq.empty
   }
 
   def start(): Unit = {}
@@ -57,6 +61,22 @@ class DefaultDomainsContributor(symbolConverter: SymbolConverter,
 
     collectDomainSorts(necessaryDomainTypes)
     collectDomainMembers(instantiatedDomains, program)
+    if (equivalenceClasses) {
+      val recognised = EquivalenceClasses.recognise(collectedFunctions, collectedAxioms)
+      // Source-distinct arguments can become diagonal after old-state evaluation
+      // or substitution. Refuse erasing wrappers rather than treating AST
+      // inequality as evidence that the emitted pattern stays non-diagonal.
+      val unsupported = program.deepCollect { case t: ast.Trigger =>
+        EquivalenceClasses.unsupportedTriggerApplications(t).map(a =>
+          symbolConverter.toSortSpecificId(a.funcname, Seq(terms.sorts.Bool)))
+      }.flatten.toSet
+      val rejected = recognised.filter(f => unsupported(f.id))
+      rejected.foreach(f => logger.warn(s"Equivalence-class encoding skipped ${f.id}: diagonal or normalization-sensitive relation trigger is unsupported"))
+      val relations = recognised -- rejected
+      val occupied = collectedFunctions.map(_.id.name).toSet ++ collectedSorts.map(_.toString) ++
+        program.deepCollect { case d: ast.Declaration => d.name }
+      equivalences = EquivalenceClasses.encode(relations, occupied)
+    }
   }
 
   private def collectDomainSorts(domainTypes: Iterable[ast.DomainType]): Unit = {
@@ -110,12 +130,21 @@ class DefaultDomainsContributor(symbolConverter: SymbolConverter,
 
   def declareSortsAfterAnalysis(sink: ProverLike): Unit = {
     collectedSorts foreach (s => sink.declare(terms.SortDecl(s)))
+    equivalences.foreach(e => sink.declare(terms.SortDecl(e.classSort)))
   }
 
   def symbolsAfterAnalysis: Iterable[terms.DomainFun] = collectedFunctions
 
   def declareSymbolsAfterAnalysis(sink: ProverLike): Unit = {
-    collectedFunctions foreach (f => sink.declare(terms.FunctionDecl(f)))
+    if (equivalenceClasses)
+      sink.comment(s"Equivalence-class encoding: ${equivalences.size} relations with all three global laws recognised")
+    val replaced = equivalences.map(_.relation).toSet
+    collectedFunctions.filterNot(replaced) foreach (f => sink.declare(terms.FunctionDecl(f)))
+    equivalences.foreach { e =>
+      sink.comment(s"Equivalence-class encoding: ${e.relation.id}; all domain axioms and trigger annotations retained")
+      sink.declare(terms.FunctionDecl(e.classifier))
+      sink.declare(e.definition)
+    }
   }
 
   def axiomsAfterAnalysis: Iterable[terms.Term] = collectedAxioms
