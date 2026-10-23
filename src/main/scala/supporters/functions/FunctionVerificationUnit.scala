@@ -191,7 +191,6 @@ trait DefaultFunctionVerificationUnitProvider extends VerifierComponent { v: Ver
 
         case (result1, phase1data) =>
           emitAndRecordFunctionAxioms(data.limitedAxiom)
-          emitAndRecordFunctionAxioms(data.triggerAxiom)
           functionEncoding.declsAfterWellDefinedness(data) map decider.prover.declare
           emitAndRecordFunctionAxioms(functionEncoding.auxiliaryAxioms(data): _*)
           emitAndRecordFunctionAxioms(data.postAxiom.toSeq: _*)
@@ -208,7 +207,16 @@ trait DefaultFunctionVerificationUnitProvider extends VerifierComponent { v: Ver
               case fatalResult: FatalResult =>
                 data.verificationFailures = data.verificationFailures :+ fatalResult
               case _ =>
-                emitAndRecordFunctionAxioms(data.definitionalAxiom.toSeq: _*)
+                val definition = data.definitionalAxiom.toSeq
+                // The stateless proxy is consumed only by definition triggers. Inspect
+                // the encoded terms (including triggers), since heap encodings differ.
+                // Wait until phase 2: translating the definition requires its recorder.
+                val consumesStateless = definition.exists(_.existsDefined {
+                  case App(fun, _) if fun == data.statelessFunction => ()
+                })
+                if (consumesStateless)
+                  emitAndRecordFunctionAxioms(data.triggerAxiom)
+                emitAndRecordFunctionAxioms(definition: _*)
                 emitAndRecordFunctionAxioms(data.bodyPreconditionPropagationAxiom: _*)
             }
 
