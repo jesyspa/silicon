@@ -5,14 +5,57 @@
 package viper.silicon.decider
 
 import org.scalatest.funsuite.AnyFunSuite
-import viper.silicon.Silicon
+import viper.silicon.{Config, Silicon}
 import viper.silicon.common.collections.immutable.InsertionOrderedSet
 import viper.silicon.state.Identifier
 import viper.silicon.state.terms._
+import viper.silicon.verifier.Verifier
 import viper.silver.ast
 import viper.silver.reporter.NoopReporter
 
 class PathConditionIndexTests extends AnyFunSuite {
+  test("Indexed factories safely widen without retaining an element-typed callback") {
+    val strings = InsertionOrderedSet.indexed[String](_.##) + "a"
+    val wide = InsertionOrderedSet.from[Any](strings)
+    assert(wide eq strings)
+    assert(!wide.contains(1))
+    assert((wide + 1).iterator.toList == List("a", 1))
+    assert((wide - 1) eq wide)
+    assert(strings.iterator.toList == List("a"))
+  }
+
+  test("Indexed numeric sets preserve symmetry, transitivity and public hash contracts") {
+    val ints = InsertionOrderedSet.indexed[Int](_.##) + 1
+    val longs = InsertionOrderedSet.indexed[Long](_.##) + 1L
+    assert(ints == longs && longs == ints)
+    assert(Set[Any](1L) == ints && ints == Set[Any](1L))
+    assert(Set[Any](1) == longs && longs == Set[Any](1))
+    assert(ints.hashCode == longs.hashCode && longs.hashCode == Set[Any](1.0d).hashCode)
+    for (values <- Seq(Seq[Any](1, 1L, 1.0f, 1.0d),
+                       Seq[Any](4294967297L, 4294967297d, BigInt("4294967297")))) {
+      val sets = values.flatMap { value =>
+        Seq(InsertionOrderedSet.indexed[Any](_.##) + value,
+            InsertionOrderedSet(value), Set(value),
+            scala.collection.immutable.HashSet(value))
+      }
+      for (a <- sets; b <- sets; c <- sets) {
+        assert(a == b && b == a)
+        assert(b == c && a == c)
+        assert(a.hashCode == b.hashCode)
+      }
+      val retained = values.foldLeft(InsertionOrderedSet.indexed[Any](_.##))(_ + _)
+      assert(retained.size == 1 && retained.head == values.head)
+      for (value <- values) {
+        assert(retained.contains(value))
+        assert((retained - value).isEmpty)
+      }
+    }
+    // Double.hashCode differs from universal numeric hashing even for 1.0.
+    assert(1.0d.hashCode != 1.##)
+    assert((InsertionOrderedSet.from[Any](longs) + 1.0d).size == 1)
+    assert(InsertionOrderedSet.from[Any](longs).contains(1.0d))
+  }
+
   test("An indexed set resolves residual collisions with equality and retains the first representative") {
     final case class Key(value: Int)
     val a = Key(1)
@@ -33,6 +76,7 @@ class PathConditionIndexTests extends AnyFunSuite {
     silicon.start()
     try {
       val base = Var(Identifier("snapshot"), sorts.Snap, false)
+      PathConditionWideningChecks.check(base)
       def chain(n: Int): Term = (0 until n).foldLeft(base: Term)((t, _) => new Second(t))
       val terms = (0 until 80).map(n => new First(chain(n)))
       val copies = (0 until 80).map(n => new First(chain(n)))
@@ -86,5 +130,41 @@ class PathConditionIndexTests extends AnyFunSuite {
       clone.popScope()
       assert(!clone.contains(conditions(3)) && clone.contains(conditions(1)))
     } finally silicon.stop()
+  }
+}
+
+private[decider] object PathConditionWideningChecks {
+  def check(term: Term): Unit = {
+    val narrow = PathConditionIndex.empty + term
+    val wide = InsertionOrderedSet.from[Any](narrow)
+    assert(wide eq narrow)
+    assert(!wide.contains("foreign") && !wide.contains(1L) && !wide.contains(null))
+    assert((wide - "foreign") eq wide)
+    val mixed = wide ++ List("foreign", 1L, 1.0d, null)
+    val ordinary = InsertionOrderedSet.from[Any](List(term, "foreign", 1L, 1.0d, null))
+    assert(mixed.iterator.toList == ordinary.iterator.toList)
+    assert(mixed.head.asInstanceOf[AnyRef] eq term)
+    assert(mixed == ordinary && ordinary == mixed)
+    assert(mixed == ordinary.toSet && ordinary.toSet == mixed)
+    assert(mixed.hashCode == ordinary.hashCode && mixed.hashCode == ordinary.toSet.hashCode)
+    assert(mixed.contains(1) && mixed.contains(1.0f))
+    assert((mixed - 1.0d).iterator.toList == (ordinary - 1).iterator.toList)
+    assert((mixed - term).iterator.toList == List("foreign", 1L, null))
+    assert((mixed - null).iterator.toList == List(term, "foreign", 1L))
+    assert(narrow.size == 1 && (narrow.head eq term))
+  }
+}
+
+// Run separately from the structural suite: flyweight configuration is JVM-global.
+class FlyweightPathConditionIndexTests extends AnyFunSuite {
+  test("Actual flyweight Term sets support factory widening without changing identity semantics") {
+    Verifier.config = new Config(Seq("--prover", "Z3-API", "dummy.vpr"))
+    assert(Verifier.config.useFlyweight)
+    val base = Var(Identifier("flyweight-snapshot"), sorts.Snap, false)
+    val term = First(base)
+    assert(term eq First(base))
+    assert((PathConditionIndex.empty + term).contains(First(base)))
+    assert(!(PathConditionIndex.empty + term).contains(new First(base)))
+    PathConditionWideningChecks.check(term)
   }
 }

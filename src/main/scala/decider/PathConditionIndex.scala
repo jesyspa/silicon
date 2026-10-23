@@ -40,8 +40,13 @@ private[decider] object PathConditionIndex {
     case _ => value.##
   }
 
-  private def indexHash(term: Term): Int =
-    if (Verifier.config.useFlyweight) term.hashCode else fingerprint(term, 4)
+  // Widened sets and cross-type equality may supply non-Terms. Universal hashing
+  // preserves Scala's cross-numeric equality; built-in Terms equal only Terms.
+  private def indexHash(value: Any): Int = value match {
+    case term: Term =>
+      if (Verifier.config.useFlyweight) term.hashCode else fingerprint(term, 4)
+    case _ => value.##
+  }
 
   def empty: InsertionOrderedSet[Term] = InsertionOrderedSet.indexed(indexHash)
 

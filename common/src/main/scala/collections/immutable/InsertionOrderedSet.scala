@@ -15,7 +15,7 @@ import scala.collection.{IterableFactory, IterableFactoryDefaults, IterableOnce,
   */
 final class InsertionOrderedSet[E] private (
     private val elements: VectorMap[Any, Unit],
-    private val indexHash: E => Int = null)
+    private val indexHash: Any => Int = null)
     extends AbstractSet[E]
        with SetOps[E, InsertionOrderedSet, InsertionOrderedSet[E]]
        with StrictOptimizedSetOps[E, InsertionOrderedSet, InsertionOrderedSet[E]]
@@ -63,10 +63,11 @@ object InsertionOrderedSet extends IterableFactory[InsertionOrderedSet] {
     }
   }
 
-  /** The index hash must be stable and equal for equal elements. Equality and iteration
-    * still use the original elements; the hash is private to this set's membership index.
+  /** Internal policy: total on Any, stable, and equal for universally equal values,
+    * including values outside E (factory widening and cross-type set equality).
+    * Equality and iteration use the original elements; public hashing is unchanged.
     */
-  def indexed[E](hash: E => Int): InsertionOrderedSet[E] =
+  private[silicon] def indexed[E](hash: Any => Int): InsertionOrderedSet[E] =
     new InsertionOrderedSet[E](VectorMap.empty, hash)
 
   private val emptySet = new InsertionOrderedSet[Any](VectorMap.empty)
