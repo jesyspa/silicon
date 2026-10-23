@@ -648,26 +648,49 @@ private object SharingAnalysis {
     case _ => true
   }
 
-  /* A bounded identity traversal can rule out small trees without structural hashing or equality.
-   * Counting all syntactic children, including rendering leaves, is an upper bound on the sharing
-   * analysis's tree size. In particular, mutable aliases cannot make this bound too small.
-   * Memo entries hold unfolded subtree sizes, not visited flags: each incoming edge adds the
-   * cached size again. Thus size(t) = min(minTreeSize, 1 + sum(size(child))) even for shared DAGs.
+  /* Without mutable aliases, structurally equal terms have equal unfolded sizes under isShareable's
+   * leaf boundaries. Identity memoization therefore computes the same size as visit, saturated at
+   * minTreeSize, counting the cached size once per incoming edge (not once per identity).
+   * Alias state is not part of structural equality: equal parents can hide differently aliased
+   * children. On encountering an alias we conservatively defer to visit instead of undercounting
+   * a subtree whose structural representative might be unaliased. We never descend into aliases
+   * or binders. A saturated subtree or minTreeSize-deep path already proves the root large enough.
    */
-  private def mayHaveLargeTree(root: Term): Boolean = {
-    val sizes = new java.util.IdentityHashMap[Term, java.lang.Integer]()
-    def size(t: Term): Int = {
-      val cached = sizes.get(t)
-      if (cached != null) return cached.intValue()
-      var total = 1
-      val children = viper.silicon.state.utils.subterms(t).iterator
-      while (children.hasNext && total < minTreeSize) {
-        total = math.min(minTreeSize, total + size(children.next()))
-      }
-      sizes.put(t, total)
-      total
+  private[decider] def mayHaveLargeTree(root: Term): Boolean = {
+    final class Frame(val term: Term) {
+      val children: Iterator[Term] = viper.silicon.state.utils.subterms(term).iterator
+      var size: Int = 1
     }
-    size(root) >= minTreeSize
+    val sizes = new java.util.IdentityHashMap[Term, java.lang.Integer]()
+    val stack = new java.util.ArrayDeque[Frame]()
+    if (!isShareable(root)) return false
+    stack.push(new Frame(root))
+    while (!stack.isEmpty) {
+      val frame = stack.peek()
+      if (frame.children.hasNext) {
+        val child = frame.children.next()
+        child match {
+          case hvr: HasVarRepr if hvr.varRepr.isDefined => return true
+          case _ =>
+        }
+        val cached = sizes.get(child)
+        if (!isShareable(child)) frame.size += 1
+        else if (cached != null) frame.size = math.min(minTreeSize, frame.size + cached.intValue())
+        else {
+          if (stack.size() >= minTreeSize - 1) return true
+          stack.push(new Frame(child))
+        }
+      } else {
+        sizes.put(frame.term, frame.size)
+        stack.pop()
+        if (!stack.isEmpty) {
+          val parent = stack.peek()
+          parent.size = math.min(minTreeSize, parent.size + frame.size)
+        }
+      }
+      if (!stack.isEmpty && stack.peek().size >= minTreeSize) return true
+    }
+    false
   }
 
   /** Returns None if the term should be rendered without sharing, and otherwise the bound subterms and, for each
