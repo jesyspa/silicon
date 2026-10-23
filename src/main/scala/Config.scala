@@ -736,6 +736,12 @@ class Config(args: Seq[String]) extends SilFrontendConfig(args, "Silicon") {
     noshort = true
   )
 
+  val equivalenceClasses: ScallopOption[Boolean] = opt[Boolean]("equivalenceClasses",
+    descr = "Experimental: encode globally proven domain equivalence relations as equality of fresh classes (Z3 StdIO only).",
+    default = Some(false),
+    noshort = true
+  )
+
   val enableDebugging: ScallopOption[Boolean] = opt[Boolean]("enableDebugging",
     descr = "Enable debugging mode",
     default = Some(false),
@@ -747,6 +753,12 @@ class Config(args: Seq[String]) extends SilFrontendConfig(args, "Silicon") {
   validateOpt(prover) {
     case Some(Z3ProverStdIO.name) | Some(Cvc5ProverStdIO.name) | Some(Z3ProverAPI.name) => Right(())
     case prover => Left(s"Unknown prover '$prover' provided. Expected one of ${Z3ProverStdIO.name}, ${Cvc5ProverStdIO.name}, ${Z3ProverAPI.name}.")
+  }
+
+  validateOpt(equivalenceClasses, prover) {
+    case (Some(true), Some(p)) if p != Z3ProverStdIO.name =>
+      Left("equivalenceClasses currently supports only Z3 StdIO; other backend trigger expansion is unaudited")
+    case _ => Right(())
   }
 
   validateOpt(timeout) {

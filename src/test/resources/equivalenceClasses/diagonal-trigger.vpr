@@ -1,0 +1,17 @@
+domain Equiv {
+  function rel(Ref, Ref): Bool
+  function diag(Ref): Bool
+  axiom { forall x: Ref :: { rel(x,x) } rel(x,x) }
+  axiom { forall x: Ref, y: Ref :: { rel(x,y) } rel(x,y) == rel(y,x) }
+  axiom {
+    forall x: Ref, y: Ref, z: Ref :: { rel(x,y), rel(y,z) }
+      rel(x,y) && rel(y,z) ==> rel(x,z)
+  }
+  // Encoding must be refused: simplifying the diagonal pattern loses diag(a).
+  axiom { forall x: Ref :: { rel(x,x) } diag(x) }
+}
+method diagonal(a: Ref)
+  requires rel(a,a)
+{
+  assert diag(a)
+}

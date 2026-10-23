@@ -1,0 +1,33 @@
+domain Equiv {
+  function rel(Ref, Ref): Bool
+  function seen(Ref, Ref): Bool
+  axiom {
+    forall x: Ref, y: Ref :: { rel(x,y) }
+      (rel(x,y) == rel(y,x)) && (x == y ==> rel(x,y))
+  }
+  axiom {
+    forall x: Ref, y: Ref, z: Ref :: { rel(x,y), rel(y,z) }
+      rel(x,y) && rel(y,z) ==> rel(x,z)
+  }
+  // The only trigger head is the relation being defined as class equality.
+  axiom { forall x: Ref, y: Ref :: { rel(x,y) } rel(x,y) ==> seen(x,y) }
+}
+method closure(a: Ref, b: Ref, c: Ref, d: Ref)
+  requires rel(a,b) && rel(b,c) && rel(c,d)
+{
+  assert rel(d,a)
+  assert rel(a,a)
+  assert seen(a,b)
+}
+method not_identity(a: Ref, b: Ref)
+  requires rel(a,b)
+  requires a != b
+{
+  //:: ExpectedOutput(assert.failed:assertion.false)
+  assert false
+}
+method not_universal(a: Ref, b: Ref)
+{
+  //:: ExpectedOutput(assert.failed:assertion.false)
+  assert rel(a,b)
+}
