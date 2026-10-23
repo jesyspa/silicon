@@ -40,10 +40,8 @@ class Z3ProverStdIO(uniqueId: String,
   val startUpArgs = Z3ProverStdIO.startUpArgs
   val randomizeSeedsOptions = Z3ProverStdIO.randomizeSeedsOptions
 
-  private val internalResources = Integer.getInteger("silicon.internalResources", 0).intValue
-  private val progressPeriod = Integer.getInteger("silicon.progressPeriod", 0).intValue
-  private val progressWarmup = Integer.getInteger("silicon.progressWarmup", 32).intValue
-  private val progressCounts = scala.collection.mutable.Map.empty[String, Long]
+  private val propositionalChecks = java.lang.Boolean.getBoolean("silicon.propositionalChecks")
+  private val internalResources = 1000
   private var reducedBudget = false
   private var lastResourceBudget = -1
   private var internalBudgetScope = false
@@ -54,7 +52,6 @@ class Z3ProverStdIO(uniqueId: String,
   private val totals = scala.collection.mutable.Map.empty[String, (Long, Long, Long, Long)]
 
   override def start(userArgsString: Option[String]): Unit = {
-    progressCounts.clear()
     reducedBudget = false
     internalBudgetScope = false
     currentPurpose = "obligation"
@@ -64,12 +61,6 @@ class Z3ProverStdIO(uniqueId: String,
   }
 
   override protected def assertUsingPushPop(goal: String, timeout: Option[Int]): (Boolean, Long) = {
-    if (internalBudgetScope) {
-      val count = progressCounts.getOrElse(currentPurpose, 0L) + 1
-      progressCounts(currentPurpose) = count
-      reducedBudget = currentPurpose != "semantic" && count > progressWarmup && internalResources > 0 &&
-        !(progressPeriod > 0 && (count - 1) % progressPeriod == 0)
-    }
     val before = if (queryResources) statistics().getOrElse("rlimit-count", "0").toLong else 0L
     val result = super.assertUsingPushPop(goal, timeout)
     if (queryCounters) {
@@ -91,14 +82,16 @@ class Z3ProverStdIO(uniqueId: String,
     super.stop()
   }
 
-  // Keep every incremental query. Periodic full probes explicitly provide search
-  // progress; an unsuccessful probe is never cached as a logical answer.
+  // Propositional probes retain the incremental engine and a positive budget.
+  // Quantifier-backed predicates and semantic permission/alias queries retain
+  // their original budgets. An unsuccessful probe is never reused as an answer.
   def withInternalBudget[T](purpose: String)(body: => T): T = {
     val previous = reducedBudget
     val previousScope = internalBudgetScope
     val previousPurpose = currentPurpose
     internalBudgetScope = true
     currentPurpose = purpose
+    reducedBudget = propositionalChecks && purpose != "semantic"
     try body finally {
       reducedBudget = previous
       internalBudgetScope = previousScope
