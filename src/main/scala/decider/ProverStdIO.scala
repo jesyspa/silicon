@@ -45,6 +45,15 @@ abstract class ProverStdIO(uniqueId: String,
    */
   protected var scopedCommands: Vector[mutable.ArrayBuffer[String]] = Vector(mutable.ArrayBuffer())
   protected var lastCheckRanOutOfMemory: Boolean = false
+  /* Whether the prover was restarted after running out of memory since the last refutation attempt */
+  protected var ranOutOfMemorySinceLastCheck: Boolean = false
+  /* The most recent command sent to the prover, to be resent if the prover runs out of memory on it */
+  protected var lastCommand: String = _
+  /* If defined, the prover runs out of memory on the state up to and including this scope depth, even
+   * after a restart. The prover is then suspended: commands are recorded but not sent, and every check is
+   * answered as unknown, until the scope is popped.
+   */
+  protected var suspendedFromDepth: Option[Int] = None
 
   var proverPath: Path = _
   var lastReasonUnknown : String = _
@@ -96,6 +105,8 @@ abstract class ProverStdIO(uniqueId: String,
     lastTimeout = -1
     userArgs = userArgsString
     scopedCommands = Vector(mutable.ArrayBuffer())
+    ranOutOfMemorySinceLastCheck = false
+    suspendedFromDepth = None
     logfileWriter = if (!Verifier.config.outputProverLog) null else viper.silver.utility.Common.PrintWriter(Verifier.config.proverLogFile(uniqueId).toFile)
     proverPath = getProverPath
     prover = createProverInstance(userArgsString)
@@ -214,6 +225,10 @@ abstract class ProverStdIO(uniqueId: String,
     val popped = scopedCommands.takeRight(n).flatten.filterNot(_.startsWith("(assert"))
     scopedCommands = scopedCommands.dropRight(n)
     scopedCommands.last ++= popped
+    if (suspendedFromDepth.exists(_ > scopedCommands.length - 1)) {
+      comment(s"Resuming prover $uniqueId")
+      restartAndReplay()
+    }
   }
 
   def emit(content: String): Unit = {
@@ -296,7 +311,7 @@ abstract class ProverStdIO(uniqueId: String,
 
     if (!result && !lastCheckRanOutOfMemory) {
       retrieveAndSaveModel()
-      retrieveReasonUnknown()
+      if (!lastCheckRanOutOfMemory) retrieveReasonUnknown()
     }
 
     pop()
@@ -323,6 +338,12 @@ abstract class ProverStdIO(uniqueId: String,
       writeLine("(get-model)")
 
       var model = readModel("\n").trim()
+      if (isOutOfMemory(model)) {
+        restartAfterMemoryOut()
+        lastCheckRanOutOfMemory = true
+        ranOutOfMemorySinceLastCheck = false
+        return
+      }
       if (model.startsWith("\"")) {
         model = model.replaceAll("\"", "")
       }
@@ -334,6 +355,12 @@ abstract class ProverStdIO(uniqueId: String,
     if (Verifier.config.reportReasonUnknown()) {
       writeLine("(get-info :reason-unknown)")
       var result = readLine()
+      if (isOutOfMemory(result)) {
+        restartAfterMemoryOut()
+        lastCheckRanOutOfMemory = true
+        ranOutOfMemorySinceLastCheck = false
+        return
+      }
       if (result.startsWith("(:reason-unknown \""))
         result = result.substring(18, result.length - 2)
       lastReasonUnknown = result
@@ -448,28 +475,64 @@ abstract class ProverStdIO(uniqueId: String,
 
   /* TODO: Handle multi-line output, e.g. multiple error messages. */
 
+  /* Reads the answer to the last command. If the prover ran out of memory, it is restarted and, since the
+   * command is not part of the replayed state, the command is sent again.
+   */
   protected def readSuccess(): Unit = {
+    if (suspendedFromDepth.isDefined) return
+
     val answer = readLine()
 
+    if (isOutOfMemory(answer)) {
+      restartAfterMemoryOut()
+      if (suspendedFromDepth.isEmpty && !replay(lastCommand)) suspend(scopedCommands.length - 1)
+    } else {
+      expectSuccess(answer)
+    }
+  }
+
+  private def expectSuccess(answer: String): Unit = {
     if (answer != "success")
       throw ProverInteractionFailed(uniqueId, s"Unexpected output of prover. Expected 'success' but found: $answer")
   }
 
-  protected def readUnsat(): Boolean = readCheckSatResult() match {
-    case "unsat" => true
-    case "sat" => false
-    case "unknown" => false
+  protected def isOutOfMemory(answer: String): Boolean =
+    answer.startsWith("(error") && answer.contains("out of memory")
 
-    case result =>
-      throw ProverInteractionFailed(uniqueId, s"Unexpected output of prover while trying to refute an assertion: $result")
+  /* A refutation attempt that fails after a memory-out restart is also attributed to the memory-out */
+  protected def readUnsat(): Boolean = {
+    val outOfMemoryBefore = ranOutOfMemorySinceLastCheck
+    val result = readCheckSatResult()
+    /* A memory-out on this check is attributed to it, not to the next one */
+    ranOutOfMemorySinceLastCheck = false
+
+    result match {
+      case "unsat" => true
+      case "sat" | "unknown" =>
+        if (outOfMemoryBefore && !lastCheckRanOutOfMemory) {
+          lastCheckRanOutOfMemory = true
+          lastReasonUnknown = "out of memory"
+        }
+        false
+
+      case result =>
+        throw ProverInteractionFailed(uniqueId, s"Unexpected output of prover while trying to refute an assertion: $result")
+    }
   }
 
   /* Reads the answer to a (check-sat). If the prover ran out of memory, it is restarted and the answer
    * is taken to be "unknown"; the caller can tell from [[lastCheckRanOutOfMemory]].
    */
   protected def readCheckSatResult(): String = {
+    if (suspendedFromDepth.isDefined) {
+      lastCheckRanOutOfMemory = true
+      lastModel = null
+      lastReasonUnknown = "out of memory"
+      return "unknown"
+    }
+
     val result = readLine()
-    lastCheckRanOutOfMemory = result.startsWith("(error") && result.contains("out of memory")
+    lastCheckRanOutOfMemory = isOutOfMemory(result)
 
     if (lastCheckRanOutOfMemory) {
       restartAfterMemoryOut()
@@ -488,6 +551,14 @@ abstract class ProverStdIO(uniqueId: String,
     logger warn msg
     comment(msg)
 
+    restartAndReplay()
+
+    lastModel = null
+    lastReasonUnknown = "out of memory"
+    ranOutOfMemorySinceLastCheck = true
+  }
+
+  private def restartAndReplay(): Unit = {
     prover.destroyForcibly()
     prover.waitFor(10, TimeUnit.SECONDS)
     input.close()
@@ -495,22 +566,39 @@ abstract class ProverStdIO(uniqueId: String,
     prover = createProverInstance(userArgs)
     connectToProver()
     lastTimeout = -1
+    suspendedFromDepth = None
 
-    /* The replayed commands are not logged again */
+    /* The replayed commands are not logged again. A (push) makes Z3 process the preceding scope. */
     comment(s"Replaying the prover state (${scopedCommands.length - 1} scopes)")
-    scopedCommands.zipWithIndex foreach { case (commands, depth) =>
-      if (depth > 0) {
-        output.println("(push)")
-        readSuccess()
-      }
-      commands foreach { command =>
-        output.println(command)
-        readSuccess()
-      }
+    var depth = 0
+    while (suspendedFromDepth.isEmpty && depth < scopedCommands.length) {
+      if (depth > 0 && !replay("(push)")) suspend(depth - 1)
+      else if (!scopedCommands(depth).forall(replay)) suspend(depth)
+      depth += 1
     }
+  }
 
-    lastModel = null
-    lastReasonUnknown = "out of memory"
+  /* Sends a command without logging it; returns false if the prover ran out of memory */
+  private def replay(command: String): Boolean = {
+    output.println(command)
+    val answer = readLine()
+    if (isOutOfMemory(answer)) {
+      false
+    } else {
+      expectSuccess(answer)
+      true
+    }
+  }
+
+  private def suspend(depth: Int): Unit = {
+    val msg = s"Prover $uniqueId ran out of memory again after a restart, suspending it until scope $depth is popped"
+    reporter report InternalWarningMessage(msg)
+    logger warn msg
+    comment(msg)
+
+    prover.destroyForcibly()
+    prover.waitFor(10, TimeUnit.SECONDS)
+    suspendedFromDepth = Some(depth)
   }
 
   protected def readModel(separator: String): String = {
@@ -579,7 +667,8 @@ abstract class ProverStdIO(uniqueId: String,
 
   protected def writeLine(out: String): Unit = {
     logToFile(out)
-    output.println(out)
+    lastCommand = out
+    if (suspendedFromDepth.isEmpty) output.println(out)
   }
 
   override def getModel(): Model = Model(lastModel)
