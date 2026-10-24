@@ -379,7 +379,17 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
       prover.check(timeout) == Unsat
     }
 
-    def check(t: Term, timeout: Int): Boolean = deciderAssert(t, Some(timeout))
+    def check(t: Term, timeout: Int): Boolean = {
+      /* If the negation of t is assumed, then t holds only if the path conditions are inconsistent. A check
+       * is allowed to fail in that case, which saves a costly query that usually ends in unknown.
+       */
+      val negated = t match {
+        case Not(a) => a
+        case _ => Not(t)
+      }
+      if (pcs.assumptions contains negated) false
+      else deciderAssert(t, Some(timeout))
+    }
 
     def assert(t: Term, timeout: Option[Int] = Verifier.config.assertTimeout.toOption)
               (Q: Boolean => VerificationResult)
