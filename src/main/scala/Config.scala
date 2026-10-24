@@ -225,6 +225,16 @@ class Config(args: Seq[String]) extends SilFrontendConfig(args, "Silicon") {
     noshort = true
   )
 
+  val assertRetryTimeout: ScallopOption[Int] = opt[Int]("assertRetryTimeout",
+    descr = (  "Timeout (in ms) for the first attempt at an SMT solver assertion that has no timeout. "
+             + "If the attempt reaches the timeout, the prover is restarted with its current state "
+             + "and the assertion is retried without a timeout. Z3 can find a proof in a fresh "
+             + "prover that it does not find after the preceding queries (default: 2000, "
+             + "0 disables the retry)."),
+    default = Some(2000),
+    noshort = true
+  )
+
   val checkTimeout: ScallopOption[Int] = opt[Int]("checkTimeout",
     descr = (  "Timeout (in ms) per SMT solver check. Solver checks differ from solver asserts "
              + "in that a failing assert always yields a verification error whereas a failing "
