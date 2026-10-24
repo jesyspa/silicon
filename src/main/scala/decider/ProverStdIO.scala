@@ -45,6 +45,9 @@ abstract class ProverStdIO(uniqueId: String,
    */
   protected var scopedCommands: Vector[mutable.ArrayBuffer[String]] = Vector(mutable.ArrayBuffer())
   protected var lastCheckRanOutOfMemory: Boolean = false
+  /* Whether the current refutation attempt is retried in a fresh prover if it reaches its timeout */
+  protected var isRetryableAttempt: Boolean = false
+  protected var lastCheckReachedTimeout: Boolean = false
   /* Whether the prover was restarted after running out of memory since the last refutation attempt */
   protected var ranOutOfMemorySinceLastCheck: Boolean = false
   /* The most recent command sent to the prover, to be resent if the prover runs out of memory on it */
@@ -286,15 +289,55 @@ abstract class ProverStdIO(uniqueId: String,
   def assert(goal: String, timeout: Option[Int]): Boolean = {
 //    bookkeeper.assertionCounter += 1
 
-    val (result, duration) = Verifier.config.assertionMode() match {
-      case Config.AssertionMode.SoftConstraints => assertUsingSoftConstraints(goal, timeout)
-      case Config.AssertionMode.PushPop => assertUsingPushPop(goal, timeout)
-    }
+    val retryTimeout = Verifier.config.assertRetryTimeout()
+    val (result, duration) =
+      if (timeout.isEmpty && Verifier.config.proverTimeout == 0 && retryTimeout > 0) {
+        /* Z3's search depends on the queries that preceded it in the same prover. An assertion that it
+         * does not prove quickly is retried, without a timeout, in a fresh prover with the same state.
+         */
+        isRetryableAttempt = true
+        val (firstResult, firstDuration) =
+          try assertInMode(goal, Some(retryTimeout)) finally isRetryableAttempt = false
+        if (firstResult || lastCheckRanOutOfMemory || !lastCheckReachedTimeout) {
+          (firstResult, firstDuration)
+        } else {
+          comment(s"Retrying the assertion in a fresh prover")
+          restartAndReplay()
+          val (retryResult, retryDuration) = assertInMode(goal, None)
+          (retryResult, firstDuration + retryDuration)
+        }
+      } else {
+        assertInMode(goal, timeout)
+      }
 
     comment(s"${viper.silver.reporter.format.formatMillisReadably(duration)}")
     comment("(get-info :all-statistics)")
 
     result
+  }
+
+  private def assertInMode(goal: String, timeout: Option[Int]): (Boolean, Long) = {
+    Verifier.config.assertionMode() match {
+      case Config.AssertionMode.SoftConstraints => assertUsingSoftConstraints(goal, timeout)
+      case Config.AssertionMode.PushPop => assertUsingPushPop(goal, timeout)
+    }
+  }
+
+  /* Records whether the prover gave up on a failed first attempt because of its timeout */
+  protected def updateLastCheckReachedTimeout(): Unit = {
+    lastCheckReachedTimeout = false
+    if (isRetryableAttempt) {
+      writeLine("(get-info :reason-unknown)")
+      val result = readLine()
+      if (isOutOfMemory(result)) {
+        restartAfterMemoryOut()
+        lastCheckRanOutOfMemory = true
+        ranOutOfMemorySinceLastCheck = false
+      } else {
+        lastCheckReachedTimeout =
+          result.contains("resource") || result.contains("timeout") || result.contains("canceled")
+      }
+    }
   }
 
   protected def assertUsingPushPop(goal: String, timeout: Option[Int]): (Boolean, Long) = {
@@ -312,6 +355,7 @@ abstract class ProverStdIO(uniqueId: String,
     if (!result && !lastCheckRanOutOfMemory) {
       retrieveAndSaveModel()
       if (!lastCheckRanOutOfMemory) retrieveReasonUnknown()
+      if (!lastCheckRanOutOfMemory) updateLastCheckReachedTimeout()
     }
 
     pop()
@@ -393,6 +437,7 @@ abstract class ProverStdIO(uniqueId: String,
 
     if (!result && !lastCheckRanOutOfMemory) {
       retrieveAndSaveModel()
+      if (!lastCheckRanOutOfMemory) updateLastCheckReachedTimeout()
     }
 
     (result, endTime - startTime)

@@ -17,7 +17,9 @@ import viper.silver.reporter.NoopReporter
 import viper.silver.verifier.{Failure, VerificationError}
 import viper.silver.verifier.errors.AssertFailed
 
-/** Silicon restarts the prover when it runs out of memory and continues verifying. */
+/** Silicon restarts the prover when it runs out of memory and continues verifying, and when an assertion
+  * reaches the timeout of its first attempt.
+  */
 class ProverMemoryOutTests extends AnyFunSuite {
   test("A prover memory-out fails the current assertion only") {
     val frontend = new tests.DummyFrontend
@@ -43,13 +45,18 @@ class ProverMemoryOutTests extends AnyFunSuite {
       (true, 29, None)))
   }
 
-  /* A Z3 prover that answers the commands in [[failOn]] with a memory-out, after processing them */
+  /* A Z3 prover that answers the commands in [[failOn]] with a memory-out, and the commands in [[replace]]
+   * with the given answers, after processing them
+   */
   private class FailingProver extends Z3ProverStdIO("memoryOut", new TermToSMTLib2Converter,
                                                     new DefaultIdentifierFactory("memoryOut"), NoopReporter) {
     var failOn: List[String] = Nil
+    var replace: List[(String, String)] = Nil
+    var starts = 0
     private var lastSent: String = _
 
     override protected def connectToProver(): Unit = {
+      starts += 1
       super.connectToProver()
       output = new PrintWriter(output, true) {
         override def println(line: String): Unit = { lastSent = line; super.println(line) }
@@ -61,6 +68,10 @@ class ProverMemoryOutTests extends AnyFunSuite {
       if (failOn.headOption.contains(lastSent)) {
         failOn = failOn.tail
         "(error \"out of memory\")"
+      } else if (replace.headOption.exists(_._1 == lastSent)) {
+        val replacement = replace.head._2
+        replace = replace.tail
+        replacement
       } else {
         answer
       }
@@ -130,6 +141,25 @@ class ProverMemoryOutTests extends AnyFunSuite {
       assert(prover.assert("(> x 0)", None))
       assert(!prover.assert("(> x 2)", None))
       assert(!prover.ranOutOfMemory())
+    }
+  }
+
+  test("An assertion that reaches the timeout of its first attempt is retried in a fresh prover") {
+    withProver { prover =>
+      prover.emit("(declare-const x Int)")
+      prover.assume("(> x 1)")
+      prover.replace = List(
+        "(check-sat)" -> "unknown",
+        "(get-info :reason-unknown)" -> "(:reason-unknown \"max. resource limit exceeded\")")
+      assert(prover.assert("(> x 0)", None))
+      assert(prover.replace.isEmpty)
+      assert(prover.starts == 2)
+      assert(!prover.ranOutOfMemory())
+
+      /* An attempt that fails for another reason is not retried */
+      prover.replace = List("(check-sat)" -> "unknown")
+      assert(!prover.assert("(> x 0)", None))
+      assert(prover.starts == 2)
     }
   }
 }
