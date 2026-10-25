@@ -228,7 +228,7 @@ class Config(args: Seq[String]) extends SilFrontendConfig(args, "Silicon") {
   val disableContradictedCheckSkip: ScallopOption[Boolean] = opt[Boolean]("disableContradictedCheckSkip",
     descr = (  "Send a solver check to the SMT solver even if the path conditions contain the "
              + "negation of the checked term. By default, such a check fails without a solver call."),
-    default = Some(false),
+    default = Some(true),
     noshort = true
   )
 
