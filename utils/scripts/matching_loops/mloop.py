@@ -421,7 +421,7 @@ def write_report(out, meta, results):
                          'baseline (an earlier query hit its time cap), so per-quantifier counts are approximate')
         on_cycle = {q for cycle in r['trigger_cycles'] for q in cycle}
         for c in r['culprits']:
-            role = ' (largest growth, not on a trigger cycle)' if on_cycle and c['qid'] not in on_cycle else ''
+            role = ' (not on a trigger cycle)' if on_cycle and c['qid'] not in on_cycle else ''
             lines.append(f"- Culprit{role}: `{short(c['qid'])}` — {c['source']}")
         for cycle in r['trigger_cycles']:
             lines.append('- Trigger cycle among hot quantifiers: ' + ' → '.join(f'`{short(c)}`' for c in cycle))
