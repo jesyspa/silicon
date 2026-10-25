@@ -131,6 +131,8 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
 
     private var _proverOptions: Map[String, String] = Map.empty
     private var _proverResetOptions: Map[String, String] = Map.empty
+    /* The number of checks that failed without a solver call because their negation is assumed */
+    private var skippedChecks: Int = 0
     private val _debuggerAssumedTerms: mutable.Set[Term] = mutable.Set.empty
     
     def functionDecls: Set[FunctionDecl] = _declaredFreshFunctions
@@ -214,6 +216,7 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
     /* Life cycle */
 
     def start(): Unit = {
+      skippedChecks = 0
       pathConditions = new LayeredPathConditionStack()
       _declaredFreshFunctions = if (Verifier.config.parallelizeBranches()) HashSet.empty else InsertionOrderedSet.empty /* [BRANCH-PARALLELISATION] */
       _declaredFreshMacros = Vector.empty
@@ -231,6 +234,12 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
     }
 
     def stop(): Unit = {
+      if (skippedChecks > 0) {
+        val msg = s"Decider $uniqueId skipped $skippedChecks contradicted checks"
+        reporter report InternalWarningMessage(msg)
+        logger info msg
+        skippedChecks = 0
+      }
       if (_prover != null) _prover.stop()
     }
 
@@ -387,8 +396,12 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
         case Not(a) => a
         case _ => Not(t)
       }
-      if (pcs.assumptions contains negated) false
-      else deciderAssert(t, Some(timeout))
+      if (!Verifier.config.disableContradictedCheckSkip() && (pcs.assumptions contains negated)) {
+        skippedChecks += 1
+        false
+      } else {
+        deciderAssert(t, Some(timeout))
+      }
     }
 
     def assert(t: Term, timeout: Option[Int] = Verifier.config.assertTimeout.toOption)

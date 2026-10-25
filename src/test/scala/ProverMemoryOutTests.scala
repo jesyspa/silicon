@@ -80,7 +80,7 @@ class ProverMemoryOutTests extends AnyFunSuite {
 
   private def withProver(body: FailingProver => Unit): Unit = {
     val backend = new Silicon(List("startedBy" -> s"Unit test ${this.getClass.getSimpleName}"))
-    backend.parseCommandLine(List("--numberOfParallelVerifiers", "1", "dummy.sil"))
+    backend.parseCommandLine(List("--numberOfParallelVerifiers", "1", "--assertRetryTimeout", "2000", "dummy.sil"))
     backend.start()
     val prover = new FailingProver
     prover.start()

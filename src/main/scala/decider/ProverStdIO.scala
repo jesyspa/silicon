@@ -48,6 +48,8 @@ abstract class ProverStdIO(uniqueId: String,
   /* Whether the current refutation attempt is retried in a fresh prover if it reaches its timeout */
   protected var isRetryableAttempt: Boolean = false
   protected var lastCheckReachedTimeout: Boolean = false
+  /* The prover's answer to the most recent refutation attempt: unsat, sat or unknown */
+  protected var lastCheckSatAnswer: String = _
   /* Whether the prover was restarted after running out of memory since the last refutation attempt */
   protected var ranOutOfMemorySinceLastCheck: Boolean = false
   /* The most recent command sent to the prover, to be resent if the prover runs out of memory on it */
@@ -302,8 +304,15 @@ abstract class ProverStdIO(uniqueId: String,
           (firstResult, firstDuration)
         } else {
           comment(s"Retrying the assertion in a fresh prover")
+          val restartStart = System.currentTimeMillis()
           restartAndReplay()
+          val restartDuration = System.currentTimeMillis() - restartStart
           val (retryResult, retryDuration) = assertInMode(goal, None)
+          val answer = if (lastCheckRanOutOfMemory) "out of memory" else lastCheckSatAnswer
+          val msg = (s"Prover $uniqueId retried an assertion in a fresh prover: first attempt $firstDuration ms, "
+                     + s"restart and replay $restartDuration ms, retry $retryDuration ms, answer $answer")
+          reporter report InternalWarningMessage(msg)
+          logger info msg
           (retryResult, firstDuration + retryDuration)
         }
       } else {
@@ -548,6 +557,7 @@ abstract class ProverStdIO(uniqueId: String,
   protected def readUnsat(): Boolean = {
     val outOfMemoryBefore = ranOutOfMemorySinceLastCheck
     val result = readCheckSatResult()
+    lastCheckSatAnswer = result
     /* A memory-out on this check is attributed to it, not to the next one */
     ranOutOfMemorySinceLastCheck = false
 
