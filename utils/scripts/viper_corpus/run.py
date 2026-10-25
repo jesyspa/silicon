@@ -171,8 +171,11 @@ class Lane:
     OOM-kills a process (in practice Z3) in its scope.
     """
 
-    def __init__(self, args, index, runner):
+    def __init__(self, args, index, runner, jar=None, cpus=None, label=None, jvm_arg=None):
         self.args, self.index, self.runner = args, index, runner
+        self.jar, self.cpus = jar or args.jar, cpus
+        self.label = label or str(index)
+        self.jvm_arg = args.jvm_arg if jvm_arg is None else jvm_arg
         self.process, self.starts, self.served = None, 0, 0
 
     def scope(self):
@@ -181,10 +184,11 @@ class Lane:
                 '-p', 'MemoryMax=' + self.args.lane_memory_max, '-p', 'MemorySwapMax=0', '--']
 
     def start(self):
-        stderr = (self.args.output_directory / f'runner-{self.index}.log').open('ab')
+        stderr = (self.args.output_directory / f'runner-{self.label}.log').open('ab')
+        pin = ['taskset', '-c', self.cpus] if self.cpus else []
         self.process = subprocess.Popen(
-            [*self.scope(), str(self.args.java), *self.args.jvm_arg,
-             '-XX:+ExitOnOutOfMemoryError', '-cp', f'{self.runner}:{self.args.jar}', 'WarmRunner'],
+            [*self.scope(), *pin, str(self.args.java), *self.jvm_arg,
+             '-XX:+ExitOnOutOfMemoryError', '-cp', f'{self.runner}:{self.jar}', 'WarmRunner'],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr, start_new_session=True)
         stderr.close()
         self.starts, self.served = self.starts + 1, 0

@@ -10,8 +10,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import analyze
 import compare
 import curate
+import night
 import run
 
 
@@ -295,6 +297,116 @@ for line in sys.stdin:
         row = dict(path='x', group='A', sha256='h', outcome='crash')
         metrics = compare.compare({'x': row}, {'x': row})['groups']['A']['metrics']
         self.assertIsNone(metrics['wall_s']['geometric_mean_ratio'])
+
+    def test_night_plan_runs_every_arm_and_seed_of_a_file_together(self):
+        a = [dict(path=f'A/{i}.vpr') for i in range(4)]
+        b = [dict(path='A/1.vpr'), dict(path='B/x.vpr')]
+        tasks = night.plan([a, b], ['M', 'W'], [0, 1, 2], 7)
+        self.assertEqual(tasks, night.plan([a, b], ['M', 'W'], [0, 1, 2], 7))
+        self.assertEqual(len(tasks), 5 * 6)
+        blocks = [tasks[i:i + 6] for i in range(0, len(tasks), 6)]
+        for block in blocks:
+            self.assertEqual(len({row['path'] for row, _, _ in block}), 1)
+            self.assertEqual(sorted((arm, seed) for _, arm, seed in block),
+                             [(arm, seed) for arm in 'MW' for seed in range(3)])
+        self.assertEqual(blocks[-1][0][0]['path'], 'B/x.vpr')
+        self.assertGreater(len({tuple((arm, seed) for _, arm, seed in b) for b in blocks}), 1)
+
+    def test_night_arm_and_window_parsing(self):
+        arm = night.parse_arm('W=/x/silicon.jar --assertTimeout 9 -J-Dk=v')
+        self.assertEqual((arm['name'], arm['jar'], arm['verifier_arg'], arm['jvm_arg']),
+                         ('W', Path('/x/silicon.jar'), ['--assertTimeout', '9'], ['-Dk=v']))
+        with self.assertRaises(ValueError):
+            night.parse_arm('/x/silicon.jar')
+        window = night.parse_window('19:00-08:00')
+        at = lambda hour: night.datetime.datetime(2026, 10, 25, hour, 30)
+        self.assertEqual([night.in_window(window, at(h)) for h in (7, 8, 18, 19, 23)],
+                         [True, False, False, True, True])
+        self.assertTrue(night.in_window(night.parse_window('any'), at(12)))
+
+    def test_night_records_arm_and_seed_and_resumes(self):
+        # A fake JVM that logs its JAR and the request options.
+        java = self.root / 'java'
+        java.write_text('#!' + sys.executable + '''
+import json, sys
+jar = sys.argv[sys.argv.index('-cp') + 1].split(':')[1]
+print(json.dumps(dict(ready=True)), flush=True)
+for line in sys.stdin:
+    log, *options = line.rstrip('\\n').split('\\t')
+    open(log, 'w').write(jar + '\\n' + ' '.join(options))
+    print(json.dumps(dict(success=True, wall_s=0.5, jvm_cpu_ticks=2, children_cpu_ticks=1,
+                          heap_after_gc_bytes=7, fatal=False)), flush=True)
+''')
+        java.chmod(0o755)
+        manifest, _ = self.manifest()
+        self.source('A/tool/b.vpr', 'method other() {}')
+        rows = curate.curate(self.corpus)
+        curate.write_manifest(manifest, rows)
+        jars = {}
+        for name in 'MW':
+            jars[name] = self.root / f'{name}.jar'
+            jars[name].write_text(name)
+        out = self.root / 'night'
+        argv = ['--corpus-root', str(self.corpus), '--manifest', str(manifest),
+                '--output-directory', str(out), '--java', str(java), '--z3', str(java),
+                '--arm', f'M={jars["M"]}', '--arm', f'W={jars["W"]} --assertTimeout 9',
+                '--seeds', '0,2', '--window', 'any', '--warmup', rows[0]['path'],
+                '--lanes', ';'.join([str(min(os.sched_getaffinity(0)))] * 2),
+                '--verifier-arg=--proverArgs', '--verifier-arg=memory_max_size=3000']
+        with patch.object(run.Lane, 'scope', return_value=[]), \
+                patch.object(run, 'process_cgroup', return_value=self.root), \
+                patch.object(run, 'oom_kills', return_value=0), \
+                patch.object(run, 'build_runner', return_value=self.root / 'runner.jar'):
+            night.main(argv)
+            results = run.read_jsonl(out / 'results.jsonl')
+            self.assertEqual(sorted((r['path'], r['arm'], r['seed']) for r in results),
+                             [(r['path'], arm, seed) for r in rows for arm in 'MW' for seed in (0, 2)])
+            for r in results:
+                jar, options = (out / r['measurement']).with_name('stdout.log').read_text().split('\n')
+                self.assertEqual(jar, str(jars[r['arm']]))
+                self.assertIn(f'memory_max_size=3000 smt.random_seed={r["seed"]} '
+                              f'sat.random_seed={r["seed"]}', options)
+                self.assertEqual('--assertTimeout 9' in options, r['arm'] == 'W')
+                self.assertEqual(r['outcome'], 'verified')
+            # One warm-up per started runner, that is per lane and arm used.
+            self.assertEqual(len(list((out / 'warmup').iterdir())),
+                             len({(r['lane'], r['arm']) for r in results}))
+            night.main(argv)
+            self.assertEqual(len(run.read_jsonl(out / 'results.jsonl')), len(results))
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                night.main([*argv, '--timeout', '9'])
+
+    def test_analyze_medians_instability_outcomes_and_gc(self):
+        out = self.root / 'night'
+        (out / 'gc').mkdir(parents=True)
+
+        def record(path, arm, seed, wall, outcome='verified'):
+            return dict(path=path, arm=arm, seed=seed, outcome=outcome, wall_s=wall, gc_s=0.1)
+
+        rows = []
+        for seed, (m, w) in enumerate([(10, 5), (12, 6), (11, 7)]):
+            rows += [record('stable', 'M', seed, m), record('stable', 'W', seed, w),
+                     record('unstable', 'M', seed, [1, 5, 1][seed]), record('unstable', 'W', seed, 1),
+                     record('flips', 'M', seed, 1),
+                     record('flips', 'W', seed, 1, 'timeout' if seed == 1 else 'verified')]
+        (out / 'results.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in rows))
+        (out / 'gc' / 'W-lane0-1.log').write_text(
+            '[1.0s] GC(0) Pause Young (Normal) (G1 Evacuation Pause) 9M->1M(64M) 300.000ms\n'
+            '[2.0s] GC(1) Pause Full (System.gc()) 9M->1M(64M) 900.000ms\n')
+        report = analyze.analyze([out], 'M', ['wall_s'], 2.0, 200, [('one', {'stable'})])
+        c = report['subsets']['all']['comparisons']['W']['wall_s']
+        self.assertEqual((c['n'], c['excluded']), (1, 1))
+        self.assertAlmostEqual(c['geomean'], 6 / 11)
+        self.assertEqual(c['ci95'], [6 / 11, 6 / 11])
+        self.assertEqual([u['path'] for u in c['unstable']], ['unstable'])
+        self.assertEqual(report['subsets']['one']['comparisons']['W']['wall_s']['n'], 1)
+        o = report['outcomes']
+        self.assertEqual(o['table']['W'][1], {'verified': 2, 'timeout': 1})
+        self.assertEqual([(x['path'], x['arm']) for x in o['across_seeds']], [('flips', 'W')])
+        self.assertEqual([(x['path'], x['seed']) for x in o['across_arms']], [('flips', 1)])
+        self.assertAlmostEqual(report['gc']['W']['log_pause_s'], 0.3)
+        self.assertAlmostEqual(report['gc']['W']['log_share'], 0.3 / 24)
+        self.assertIn('| W | wall_s | 1 |', analyze.markdown(report))
 
 
 if __name__ == '__main__':
