@@ -402,6 +402,21 @@ for line in sys.stdin:
                 night.execute(args, arms, [rows])
         self.assertEqual(run.read_jsonl(args.output_directory / 'results.jsonl'), [])
 
+    def test_prover_events_parse_retries_and_skipped_checks(self):
+        log = ('Prover 00 retried an assertion in a fresh prover: first attempt 2003 ms, '
+               'restart and replay 412 ms, retry 95 ms, answer unsat\n'
+               'Decider 00 skipped 7 contradicted checks\n'
+               'Prover 01 retried an assertion in a fresh prover: first attempt 1990 ms, '
+               'restart and replay 30 ms, retry 0 ms, answer out of memory\n'
+               'Decider 01 skipped 2 contradicted checks\n')
+        events = run.prover_events(log)
+        self.assertEqual(events['skipped_checks'], 9)
+        self.assertEqual(events['retries'], [
+            dict(prover='00', first_ms=2003, restart_ms=412, retry_ms=95, answer='unsat'),
+            dict(prover='01', first_ms=1990, restart_ms=30, retry_ms=0, answer='out of memory')])
+        self.assertEqual(run.prover_events('Silicon found 1 error'),
+                         dict(retries=[], skipped_checks=0))
+
     def test_seed_joins_the_single_prover_arguments_string(self):
         args, rows = self.args()
         row = dict(rows[0], verifier_args=['--assumeInjectivityOnInhale'])
@@ -554,6 +569,8 @@ for line in sys.stdin:
                      record('unstable', 'M', seed, [1, 5, 1][seed]), record('unstable', 'W', seed, 1),
                      record('flips', 'M', seed, 1),
                      record('flips', 'W', seed, 1, 'timeout' if seed == 1 else 'verified')]
+        rows[1].update(skipped_checks=4, retries=[
+            dict(prover='00', first_ms=2000, restart_ms=500, retry_ms=100, answer='unsat')])
         (out / 'results.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in rows))
         (out / 'gc' / 'W-lane0-1.log').write_text(
             '[1.0s] GC(0) Pause Young (Normal) (G1 Evacuation Pause) 9M->1M(64M) 300.000ms\n'
@@ -574,6 +591,14 @@ for line in sys.stdin:
         self.assertAlmostEqual(report['gc']['W']['log_pause_s'], 0.3)
         self.assertAlmostEqual(report['gc']['W']['log_share'], 0.3 / 30)
         self.assertIn('| W | wall_s | 1 |', analyze.markdown(report))
+        r = report['retries']
+        self.assertEqual(r['table']['W'][0], dict(
+            tasks=3, tasks_with_retry=1, retries=1, first_s=2.0, restart_s=0.5, retry_s=0.1,
+            answers={'unsat': 1}, skipped_checks=4))
+        self.assertEqual([(t['path'], t['arm'], t['seed']) for t in r['tasks']], [('stable', 'W', 0)])
+        self.assertIn('2000/500/100 unsat', analyze.markdown(report))
+        only = analyze.analyze([out], 'M', ['wall_s'], 2.0, 200, [], only={'flips'})
+        self.assertEqual(only['files'], 1)
 
 
 if __name__ == '__main__':
