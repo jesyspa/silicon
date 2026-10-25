@@ -49,6 +49,7 @@ The verdict is one of these:
 - `loop`: max generation reaches 80% of the threshold at every eager threshold, and total instances grow with the threshold.
   The culprits are the quantifiers whose instances grow most in absolute terms. To count, a quantifier must grow at least 1.5x and reach half the highest threshold in generation.
   Quantifiers on a trigger cycle rank first. The others, such as `Seq_add_def`, only consume the terms that the cycle creates.
+  The quantifier with the largest growth is always listed, even when it is not on a cycle. On pair_insertion_sort that is the body of Gobra's `sorted` function, which consumes the terms that the inverse-function and Seq index axioms create.
 - `possible loop`: max generation reaches 80% of the threshold only at the base threshold, or a hot quantifier feeds its own trigger and reaches half the threshold.
 - `no loop`: neither.
 

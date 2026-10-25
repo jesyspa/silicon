@@ -166,6 +166,10 @@ class Tests(unittest.TestCase):
         base['profile']['eater'] = [9000, 100, 1]
         sweep[0][1]['profile']['eater'] = [100, 10, 1]
         self.assertEqual(mloop.loop_verdict(base, sweep, 100, quants, {'shift'})[1], ['shift', 'eater'])
+        for name, size in [('a', 5000), ('b', 5000), ('c', 5000)]:
+            base['profile'][name] = [size, 100, 1]
+        self.assertEqual(mloop.loop_verdict(base, sweep, 100, quants, {'shift', 'a', 'b', 'c'})[1],
+                         ['c', 'b', 'a', 'eater'])
         self.assertEqual(feeding['shift'], ['(f (+ x 1))'])
         calm = run(900, 3, {'tame': [900, 3, 1]})
         self.assertEqual(mloop.loop_verdict(calm, [], 100, quants)[0], 'no loop')

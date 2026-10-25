@@ -257,7 +257,8 @@ def loop_verdict(base, sweep, threshold, quants, cyclic=()):
     with it. Culprits are the quantifiers with the largest absolute growth in instances from
     the lowest to the highest threshold, among those that grow at least 1.5x and reach half
     the highest threshold in generation. Quantifiers on a trigger cycle (`cyclic`) come
-    first: the others only consume the terms the cycle creates.
+    first: the others only consume the terms the cycle creates. The quantifier with the largest
+    growth is always a culprit, even when it is not on a cycle.
     possible loop: max generation reaches the threshold only at the base threshold, or a hot
     quantifier feeds its own trigger.
     """
@@ -271,8 +272,11 @@ def loop_verdict(base, sweep, threshold, quants, cyclic=()):
         before = low.get(qid, [0, 0, 0])[0]
         if generation >= 0.5 * runs[-1][0] and instances >= 1.5 * max(before, 1):
             culprits.append((instances - before, qid))
+    largest = max(culprits, default=(0, None))[1]
     culprits = [qid for _, _, qid in sorted(((qid in cyclic, growth, qid) for growth, qid in culprits),
                                              reverse=True)[:3]]
+    if largest and largest not in culprits:
+        culprits.append(largest)
     hot = top(base['profile'], 10)
     feeding = {qid: smtq.feeding_terms(quants[qid], quants[qid]) for qid, _ in hot if qid in quants}
     if growing and culprits:
@@ -398,8 +402,10 @@ def write_report(out, meta, results):
         if any(s['baseline_mismatch'] for s in [r['replay']] + r['eager_sweep'] + r['seeds']):
             lines.append('- Warning: in some history replays the earlier queries ran differently from their '
                          'baseline (an earlier query hit its time cap), so per-quantifier counts are approximate')
+        on_cycle = {q for cycle in r['trigger_cycles'] for q in cycle}
         for c in r['culprits']:
-            lines.append(f"- Culprit: `{short(c['qid'])}` — {c['source']}")
+            role = ' (largest growth, not on a trigger cycle)' if on_cycle and c['qid'] not in on_cycle else ''
+            lines.append(f"- Culprit{role}: `{short(c['qid'])}` — {c['source']}")
         for cycle in r['trigger_cycles']:
             lines.append('- Trigger cycle among hot quantifiers: ' + ' → '.join(f'`{short(c)}`' for c in cycle))
         lines += ['', '| quantifier | instances | max gen | feeds own trigger | source |', '|---|---:|---:|---|---|']
