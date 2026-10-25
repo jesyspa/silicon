@@ -238,7 +238,7 @@ class Config(args: Seq[String]) extends SilFrontendConfig(args, "Silicon") {
              + "and the assertion is retried without a timeout. Z3 can find a proof in a fresh "
              + "prover that it does not find after the preceding queries (default: 2000, "
              + "0 disables the retry)."),
-    default = Some(2000),
+    default = Some(0),
     noshort = true
   )
 
