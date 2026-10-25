@@ -103,6 +103,35 @@ The JVM runs with `-XX:+ExitOnOutOfMemoryError`. The harness restarts a runner a
 
 Results stay comparable with `compare.py`. Warm and cold outcomes can differ where stack depth matters. JIT-compiled frames are smaller, so a file that overflows the stack in a cold JVM can verify in a warm one. Solver memory limits need cgroups and are rejected with `--warm`.
 
+## Seeded multi-arm nights
+
+`night.py` compares several JARs or option sets ("arms") under several Z3 seeds in one warm run. Each `--arm` is `NAME=JAR` followed by extra Silicon arguments; arguments prefixed with `-J` go to the JVM instead. `--seeds` lists the Z3 seeds (default `0,1,2`), merged into `--proverArgs` as with `run.py --seed`. Common `--jvm-arg` and `--verifier-arg` options apply to every arm.
+
+```sh
+python3 utils/scripts/viper_corpus/night.py \
+  --corpus-root "$CORPUS" --manifest "$BENCH/quick.jsonl" --output-directory "$BENCH/night" \
+  --java /absolute/path/to/java --z3 /absolute/path/to/z3 \
+  --arm "M=/jars/main/silicon.jar" --arm "W=/jars/candidate/silicon.jar --assertTimeout 10000" \
+  --lanes '2,10;3,11;6,14' --jvm-arg=-Xmx4g --jvm-arg=-Xss128m \
+  --verifier-arg=--proverArgs --verifier-arg=memory_max_size=3000 \
+  --warmup DaG/gobra/dafny_book/chap08.vpr
+```
+
+Files run in a shuffled order. Every arm and seed of a file runs, in shuffled order, before the next file starts, so a run stopped early leaves every arm and seed with the same files and spreads load drift over them. Repeated `--manifest` options run in order, so a priority subset can go first. `--order-seed` fixes both shuffles.
+
+Each `--lanes` entry is a CPU set. A lane holds one warm runner per arm, started on first use, each in its own `--lane-memory-max` scope and pinned with `taskset`. Restarts and outcomes follow warm mode. `--warmup` inputs are verified, unrecorded, after every runner start. Each runner writes `-Xlog:gc` to `gc/<arm>-lane<N>-<pid>.log`.
+
+`results.jsonl` holds one record per file, arm and seed, with the warm-mode fields plus `arm`, `seed` and `cpus`. Repeat the command to resume; a changed configuration other than `--lanes` and `--window` is refused. Touch `STOP` in the output directory to stop after the running tasks. Lanes start tasks only inside `--window` (local time, default `19:00-08:00`; `any` disables it) and stop at its end.
+
+`analyze.py` reports a night against a baseline arm:
+
+```sh
+python3 utils/scripts/viper_corpus/analyze.py "$BENCH/night" --baseline M \
+  --subset seq=targeted.txt --json "$BENCH/night/analysis.json" > "$BENCH/night/analysis.md"
+```
+
+Per file and arm it takes the median across seeds. A file is unstable when max/min across seeds exceeds `--unstable` (default 2) in any arm. A file enters a comparison only when every seed of both arms has the same `verified` or `failed` outcome and a positive metric. For stable files it reports the geometric mean ratio (arm / baseline) with a 95% percentile bootstrap CI over files, and the number of files. Unstable files, outcome tables per arm and seed, outcome changes across seeds within an arm, and outcome changes across arms at one seed are listed separately. GC pause share is the summed non-`System.gc()` pause time in the `-Xlog:gc` logs over the summed request wall time, per arm; the per-request MXBean share is shown beside it. `--subset NAME=FILE` repeats the ratios for the corpus paths listed in FILE.
+
 ## Compare
 
 Run the candidate JAR into another output directory with the same manifest and options, then:

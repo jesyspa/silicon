@@ -8,5 +8,7 @@ See [harness.md](../../../harness.md) for delegated cgroup setup, commands, meas
 - `run.py`: parallel, resumable runs through `../solver_cpu_benchmark.py`.
 - `WarmRunner.java`: long-lived Silicon driver for `run.py --warm`.
 - `compare.py`: per-group timing ratios, outcome transitions, and ranked changes.
+- `night.py`: several arms under several Z3 seeds, interleaved per file, in warm lanes.
+- `analyze.py`: seed-median ratios with bootstrap CIs, instability, outcome tables, and GC share for `night.py` runs.
 
 Each script has `--help`. Keep corpus files, manifests, and run output outside the repository.
