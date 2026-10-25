@@ -84,6 +84,9 @@ class NightLane(run.Lane):
             self.process.stdin.write(('\t'.join([str(log), *options]) + '\n').encode())
             self.process.stdin.flush()
             response = self.read(self.args.timeout + run.HANG_GRACE_S)
+            if response:  # analyze.py counts warm-up wall against the runner's GC log
+                with (directory / 'wall.jsonl').open('a') as sink:
+                    sink.write(json.dumps(dict(runner=self.label, wall_s=response['wall_s'])) + '\n')
             if not response or response.get('fatal'):
                 break  # the next request restarts the runner
 

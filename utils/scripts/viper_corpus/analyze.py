@@ -107,8 +107,12 @@ PAUSE = re.compile(r'GC\(\d+\) (Pause .*) (\d+(?:\.\d+)?)ms$')
 
 
 def gc_share(directory, files, arms):
-    """Per arm: logged GC pause seconds, excluding System.gc(), over measured request wall."""
+    """Per arm: logged GC pause seconds, excluding System.gc(), over request wall.
+
+    The logs also cover warm-up requests, so their wall joins the denominator.
+    """
     report = {}
+    warmups = read_jsonl(directory / 'warmup' / 'wall.jsonl')
     for arm in arms:
         pause = 0.0
         for log in sorted((directory / 'gc').glob(f'{arm}-lane*.log*')):
@@ -118,9 +122,11 @@ def gc_share(directory, files, arms):
                     pause += float(m.group(2)) / 1000
         records = [r for by_arm in files.values() for r in by_arm.get(arm, {}).values()]
         wall = sum(r['wall_s'] for r in records if r.get('wall_s'))
+        warmup = sum(w['wall_s'] for w in warmups if w['runner'].startswith(arm + '-lane'))
         mx = sum(r['gc_s'] for r in records if r.get('gc_s') is not None)
         report[arm] = dict(log_pause_s=round(pause, 1), wall_s=round(wall, 1),
-                           log_share=pause / wall if wall else None,
+                           warmup_wall_s=round(warmup, 1),
+                           log_share=pause / (wall + warmup) if wall else None,
                            request_gc_s=round(mx, 1), request_share=mx / wall if wall else None)
     return report
 
@@ -163,10 +169,10 @@ def markdown(report):
                 out.append(f'| {arm} | {metric} | {c["n"]} | {fmt(c["geomean"])} | {ci or "-"} '
                            f'| {len(c["unstable"])} | {c["excluded"]} |')
         out.append('')
-        for arm, metrics in subset['comparisons'].items():
-            c = next(iter(metrics.values()))
+        # Instability spans all arms, so every comparison of a metric lists the same files.
+        for metric, c in next(iter(subset['comparisons'].values()), {}).items():
             if c['unstable']:
-                out.append(f'Unstable files ({arm} vs baseline, {next(iter(metrics))}): ' +
+                out.append(f'Unstable files ({metric}, max/min across seeds per arm): ' +
                            '; '.join(f'{u["path"]} {u["spread"]}' for u in c['unstable']))
         out.append('')
     o = report['outcomes']
@@ -179,11 +185,12 @@ def markdown(report):
     out += [f'- {c["arm"]} {c["path"]}: {c["outcomes"]}' for c in o['across_seeds']]
     out += ['', f'### Outcome changes across arms at the same seed ({len(o["across_arms"])})', '']
     out += [f'- seed {c["seed"]} {c["path"]}: {c["outcomes"]}' for c in o['across_arms']]
-    out += ['', '## GC pause share (non-System.gc pauses / measured request wall)', '',
-            '| arm | -Xlog:gc pause s | request wall s | log share | MXBean share |',
-            '|---|---|---|---|---|']
+    out += ['', '## GC pause share (non-System.gc pauses / request wall)', '',
+            '| arm | -Xlog:gc pause s | request wall s | warm-up wall s | log share | MXBean share |',
+            '|---|---|---|---|---|---|']
     for arm, g in report['gc'].items():
-        out.append(f'| {arm} | {g["log_pause_s"]} | {g["wall_s"]} | {fmt(g["log_share"])} '
+        out.append(f'| {arm} | {g["log_pause_s"]} | {g["wall_s"]} | {g["warmup_wall_s"]} '
+                   f'| {fmt(g["log_share"])} '
                    f'| {fmt(g["request_share"])} |')
     return '\n'.join(out) + '\n'
 

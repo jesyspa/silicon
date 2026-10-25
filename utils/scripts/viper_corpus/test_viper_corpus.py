@@ -369,8 +369,9 @@ for line in sys.stdin:
                 self.assertEqual('--assertTimeout 9' in options, r['arm'] == 'W')
                 self.assertEqual(r['outcome'], 'verified')
             # One warm-up per started runner, that is per lane and arm used.
-            self.assertEqual(len(list((out / 'warmup').iterdir())),
-                             len({(r['lane'], r['arm']) for r in results}))
+            started = {(r['lane'], r['arm']) for r in results}
+            self.assertEqual(len(list((out / 'warmup').glob('*.log'))), len(started))
+            self.assertEqual(len(run.read_jsonl(out / 'warmup' / 'wall.jsonl')), len(started))
             night.main(argv)
             self.assertEqual(len(run.read_jsonl(out / 'results.jsonl')), len(results))
             with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
@@ -393,6 +394,8 @@ for line in sys.stdin:
         (out / 'gc' / 'W-lane0-1.log').write_text(
             '[1.0s] GC(0) Pause Young (Normal) (G1 Evacuation Pause) 9M->1M(64M) 300.000ms\n'
             '[2.0s] GC(1) Pause Full (System.gc()) 9M->1M(64M) 900.000ms\n')
+        (out / 'warmup').mkdir()
+        (out / 'warmup' / 'wall.jsonl').write_text('{"runner": "W-lane0", "wall_s": 6}\n')
         report = analyze.analyze([out], 'M', ['wall_s'], 2.0, 200, [('one', {'stable'})])
         c = report['subsets']['all']['comparisons']['W']['wall_s']
         self.assertEqual((c['n'], c['excluded']), (1, 1))
@@ -405,7 +408,7 @@ for line in sys.stdin:
         self.assertEqual([(x['path'], x['arm']) for x in o['across_seeds']], [('flips', 'W')])
         self.assertEqual([(x['path'], x['seed']) for x in o['across_arms']], [('flips', 1)])
         self.assertAlmostEqual(report['gc']['W']['log_pause_s'], 0.3)
-        self.assertAlmostEqual(report['gc']['W']['log_share'], 0.3 / 24)
+        self.assertAlmostEqual(report['gc']['W']['log_share'], 0.3 / 30)
         self.assertIn('| W | wall_s | 1 |', analyze.markdown(report))
 
 
