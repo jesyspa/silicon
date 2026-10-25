@@ -188,6 +188,18 @@ class Tests(unittest.TestCase):
         self.assertIn(';@E ', next(tap.glob('*.in')).read_text())
 
     @unittest.skipUnless(Z3, 'needs z3')
+    def test_tap_records_out_of_memory_from_stderr_as_the_answer(self):
+        tap = self.root / 'tap'
+        tap.mkdir()
+        env = dict(os.environ, MLOOP_Z3=Z3, MLOOP_TAP_DIR=str(tap))
+        script = (PREAMBLE.replace('eager_threshold 100', 'eager_threshold 100000') + LOOP
+                  + '(assert (= (f 0) 3))\n(check-sat)\n')
+        output = subprocess.run([sys.executable, str(HERE / 'z3tap.py'), '-smt2', '-in', 'memory_max_size=30'],
+                                input=script, capture_output=True, text=True, env=env, timeout=60).stdout
+        self.assertIn('out of memory', output)
+        self.assertEqual([r['result'] for r in mloop.queries(tap)], ['out of memory'])
+
+    @unittest.skipUnless(Z3, 'needs z3')
     def test_end_to_end_finds_a_shift_loop(self):
         body = PREAMBLE + TAME + '(assert (g 2))\n(check-sat)\n' + LOOP + '(assert (= (f 0) 3))\n(check-sat)\n'
         self.tap(body, [(0.01, 'sat'), (2.0, 'unknown')])

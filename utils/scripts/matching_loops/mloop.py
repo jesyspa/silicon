@@ -74,6 +74,8 @@ def queries(tap, end=None):
                     stamp, _, text = line.partition(' ')
                     if text.strip() in RESULTS:
                         responses.append((float(stamp), text.strip()))
+                    elif text.startswith('(error') and 'out of memory' in text:
+                        responses.append((float(stamp), 'out of memory'))
         stamp = closed = None
         timeout = rlimit = None
         unanswered = []

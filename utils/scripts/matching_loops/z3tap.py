@@ -8,7 +8,9 @@ Environment:
 <pid>.in is the exact input Z3 received. Before every (check-sat ...) it holds a line
 ';@T <unix time>'; at end of input or on SIGTERM it ends with ';@E <unix time>'. It is
 flushed at every check-sat, so a SIGKILL loses at most input after the last one.
-<pid>.out holds every Z3 output line prefixed with '<unix time> '.
+<pid>.out holds every Z3 output line, from stdout and stderr, prefixed with '<unix time> '.
+Silicon merges the prover's stderr into its stdout, and Z3 reports running out of memory on
+stderr, so the tap forwards stderr to its own stdout as well.
 """
 import json
 import os
@@ -25,7 +27,7 @@ def main():
     with open(os.path.join(directory, tag + '.args'), 'w') as f:
         json.dump(sys.argv[1:], f)
     z3 = subprocess.Popen([os.environ['MLOOP_Z3']] + sys.argv[1:],
-                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0)
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
     fin = open(os.path.join(directory, tag + '.in'), 'w', buffering=1 << 16)
     fout = open(os.path.join(directory, tag + '.out'), 'w', buffering=1)
     lock = threading.RLock()
@@ -52,18 +54,21 @@ def main():
 
     signal.signal(signal.SIGTERM, finish)
 
-    def pump():
-        for line in iter(z3.stdout.readline, b''):
-            fout.write('%.6f %s' % (time.time(), line.decode(errors='replace')))
-            try:
-                sys.stdout.buffer.write(line)
-                sys.stdout.buffer.flush()
-            except BrokenPipeError:
-                pass
-        fout.close()
+    output = threading.Lock()
 
-    reader = threading.Thread(target=pump, daemon=True)
-    reader.start()
+    def pump(stream):
+        for line in iter(stream.readline, b''):
+            with output:
+                fout.write('%.6f %s' % (time.time(), line.decode(errors='replace')))
+                try:
+                    sys.stdout.buffer.write(line)
+                    sys.stdout.buffer.flush()
+                except BrokenPipeError:
+                    pass
+
+    readers = [threading.Thread(target=pump, args=(stream,), daemon=True) for stream in (z3.stdout, z3.stderr)]
+    for reader in readers:
+        reader.start()
     for line in sys.stdin.buffer:
         text = line.decode(errors='replace')
         with lock:
@@ -81,7 +86,9 @@ def main():
         except BrokenPipeError:
             break
     finish()
-    reader.join(timeout=2)
+    for reader in readers:
+        reader.join(timeout=2)
+    fout.close()
 
 
 if __name__ == '__main__':
