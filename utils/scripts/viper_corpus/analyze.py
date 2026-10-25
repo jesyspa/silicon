@@ -103,6 +103,36 @@ def outcomes(files, arms, seeds):
                 across_seeds=across_seeds, across_arms=across_arms)
 
 
+def retries(files, arms, seeds):
+    """Per arm and seed: fresh-prover retries and their cost; per task: each retry."""
+    table = {arm: {seed: dict(tasks=0, tasks_with_retry=0, retries=0, first_s=0.0, restart_s=0.0,
+                              retry_s=0.0, answers=Counter(), skipped_checks=0)
+                   for seed in seeds} for arm in arms}
+    tasks = []
+    for path, by_arm in sorted(files.items()):
+        for arm, records in sorted(by_arm.items()):
+            for seed, r in sorted(records.items()):
+                t = table[arm][seed]
+                t['tasks'] += 1
+                t['skipped_checks'] += r.get('skipped_checks') or 0
+                events = r.get('retries') or []
+                if not events:
+                    continue
+                t['tasks_with_retry'] += 1
+                t['retries'] += len(events)
+                for e in events:
+                    t['first_s'] += e['first_ms'] / 1000
+                    t['restart_s'] += e['restart_ms'] / 1000
+                    t['retry_s'] += e['retry_ms'] / 1000
+                    t['answers'][e['answer']] += 1
+                tasks.append(dict(path=path, arm=arm, seed=seed, outcome=r['outcome'],
+                                  wall_s=r.get('wall_s'), retries=events))
+    for by_seed in table.values():
+        for t in by_seed.values():
+            t['answers'] = dict(t['answers'])
+    return dict(table=table, tasks=tasks)
+
+
 PAUSE = re.compile(r'GC\(\d+\) (Pause .*) (\d+(?:\.\d+)?)ms$')
 
 
@@ -131,14 +161,17 @@ def gc_share(directory, files, arms):
     return report
 
 
-def analyze(directories, baseline, metrics, threshold, samples, subsets, seed=0):
+def analyze(directories, baseline, metrics, threshold, samples, subsets, seed=0, only=None):
     files = load(directories)
+    if only is not None:
+        files = {p: v for p, v in files.items() if p in only}
     arms = sorted({a for by_arm in files.values() for a in by_arm})
     seeds = sorted({s for by_arm in files.values() for recs in by_arm.values() for s in recs})
     if baseline not in arms:
         raise ValueError('baseline arm has no results: ' + baseline)
     report = dict(arms=arms, seeds=seeds, baseline=baseline, unstable_threshold=threshold,
                   files=len(files), outcomes=outcomes(files, arms, seeds),
+                  retries=retries(files, arms, seeds),
                   gc=gc_share(directories[-1], files, arms), subsets={})
     for name, paths in [('all', None), *subsets]:
         chosen = {p: v for p, v in files.items() if paths is None or p in paths}
@@ -185,6 +218,20 @@ def markdown(report):
     out += [f'- {c["arm"]} {c["path"]}: {c["outcomes"]}' for c in o['across_seeds']]
     out += ['', f'### Outcome changes across arms at the same seed ({len(o["across_arms"])})', '']
     out += [f'- seed {c["seed"]} {c["path"]}: {c["outcomes"]}' for c in o['across_arms']]
+    r = report['retries']
+    out += ['', '## Fresh-prover retries and skipped checks', '',
+            '| arm | seed | tasks | with retry | retries | first s | restart s | retry s '
+            '| retry answers | skipped checks |', '|---|---|---|---|---|---|---|---|---|---|']
+    for arm, by_seed in r['table'].items():
+        for seed, t in by_seed.items():
+            out.append(f'| {arm} | {seed} | {t["tasks"]} | {t["tasks_with_retry"]} | {t["retries"]} '
+                       f'| {t["first_s"]:.1f} | {t["restart_s"]:.1f} | {t["retry_s"]:.1f} | ' +
+                       ', '.join(f'{k} {v}' for k, v in sorted(t['answers'].items())) +
+                       f' | {t["skipped_checks"]} |')
+    out += ['', f'### Tasks with retries ({len(r["tasks"])}); per retry: first/restart/retry ms answer', '']
+    out += [f'- {t["arm"]} seed {t["seed"]} {t["path"]}: {t["outcome"]} {fmt(t["wall_s"], 1)} s; ' +
+            '; '.join(f'{e["first_ms"]}/{e["restart_ms"]}/{e["retry_ms"]} {e["answer"]}'
+                      for e in t['retries']) for t in r['tasks']]
     out += ['', '## GC pause share (non-System.gc pauses / request wall)', '',
             '| arm | -Xlog:gc pause s | request wall s | warm-up wall s | log share | MXBean share |',
             '|---|---|---|---|---|---|']
@@ -193,6 +240,11 @@ def markdown(report):
                    f'| {fmt(g["log_share"])} '
                    f'| {fmt(g["request_share"])} |')
     return '\n'.join(out) + '\n'
+
+
+def read_paths(path):
+    lines = path.read_text().splitlines()
+    return {l.strip() for l in lines if l.strip() and not l.startswith('#')}
 
 
 def main(argv=None):
@@ -207,16 +259,18 @@ def main(argv=None):
     parser.add_argument('--subset', action='append', default=[],
                         help='NAME=FILE: also report the corpus paths listed in FILE')
     parser.add_argument('--json', type=Path, help='also write the full report here')
+    parser.add_argument('--only', type=Path,
+                        help='analyse only the corpus paths listed in this file; seeds are those they have')
     args = parser.parse_args(argv)
     subsets = []
     for spec in args.subset:
         name, _, path = spec.partition('=')
-        lines = Path(path).read_text().splitlines()
-        subsets.append((name, {l.strip() for l in lines if l.strip() and not l.startswith('#')}))
+        subsets.append((name, read_paths(Path(path))))
     try:
         report = analyze(args.directory, args.baseline,
                          args.metric or ['wall_s', 'total_process_cpu_s'],
-                         args.unstable, args.bootstrap, subsets)
+                         args.unstable, args.bootstrap, subsets,
+                         only=args.only and read_paths(args.only))
     except (OSError, ValueError) as exc:
         parser.exit(1, str(exc) + '\n')
     if args.json:

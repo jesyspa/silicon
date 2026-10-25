@@ -83,6 +83,18 @@ def outcome(measurement, log):
     return 'crash'
 
 
+RETRY = re.compile(r'Prover (\S+) retried an assertion in a fresh prover: first attempt (\d+) ms, '
+                   r'restart and replay (\d+) ms, retry (\d+) ms, answer (.+)')
+SKIPPED = re.compile(r'Decider \S+ skipped (\d+) contradicted checks')
+
+
+def prover_events(log):
+    """Fresh-prover retries and skipped contradicted checks that Silicon logged."""
+    retries = [dict(prover=m[1], first_ms=int(m[2]), restart_ms=int(m[3]), retry_ms=int(m[4]),
+                    answer=m[5].strip()) for m in RETRY.finditer(log)]
+    return dict(retries=retries, skipped_checks=sum(int(m[1]) for m in SKIPPED.finditer(log)))
+
+
 SEED_PARAMETERS = ('smt.random_seed', 'sat.random_seed')
 
 
@@ -133,7 +145,8 @@ def run_one(row, args):
                 returncode=measurement.get('returncode'),
                 measurement=str(relative / 'measurement.json'),
                 errors=measurement.get('errors', []) + (
-                    [completed.stderr.decode(errors='replace')] if not measurement else []))
+                    [completed.stderr.decode(errors='replace')] if not measurement else []),
+                **prover_events(log))
 
 
 RUNNER = Path(__file__).with_name('WarmRunner.java')
@@ -265,7 +278,7 @@ def run_warm_once(row, args, lane):
                       returncode=0 if response['success'] else 1, success=response['success']), log),
                   wall_s=None, solver_cpu_s=None, total_process_cpu_s=None, jvm_cpu_s=None,
                   heap_after_gc_bytes=None, gc=None, gc_s=None, seed=getattr(args, 'seed', None),
-                  measurement=str(relative / 'measurement.json'), **context)
+                  measurement=str(relative / 'measurement.json'), **context, **prover_events(log))
     if response:
         result.update(wall_s=response['wall_s'], solver_cpu_s=response['children_cpu_ticks'] / tick,
                       jvm_cpu_s=response['jvm_cpu_ticks'] / tick,
