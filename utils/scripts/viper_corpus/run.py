@@ -83,6 +83,27 @@ def outcome(measurement, log):
     return 'crash'
 
 
+SEED_PARAMETERS = ('smt.random_seed', 'sat.random_seed')
+
+
+def verifier_args(row, args):
+    """Common then per-input Silicon arguments, with the seed merged into --proverArgs.
+
+    Silicon takes one --proverArgs string, so the seed joins an existing one.
+    """
+    tokens = [*args.verifier_arg, *row.get('verifier_args', [])]
+    seed = getattr(args, 'seed', None)
+    if seed is None:
+        return tokens
+    extra = ' '.join(f'{name}={seed}' for name in SEED_PARAMETERS)
+    for index, token in enumerate(tokens):
+        if token == '--proverArgs' and index + 1 < len(tokens):
+            return [*tokens[:index + 1], tokens[index + 1] + ' ' + extra, *tokens[index + 2:]]
+        if token.startswith('--proverArgs='):
+            return [*tokens[:index], token + ' ' + extra, *tokens[index + 1:]]
+    return [*tokens, '--proverArgs', extra]
+
+
 def run_one(row, args):
     relative = Path('inputs') / (row['sha256'] + '-' + uuid.uuid4().hex)
     directory = args.output_directory / relative
@@ -95,8 +116,7 @@ def run_one(row, args):
         if value is not None:
             command += ['--' + option.replace('_', '-'), str(value)]
     command += ['--jvm-arg=' + token for token in args.jvm_arg]
-    command += ['--verifier-arg=' + token for token in args.verifier_arg]
-    command += ['--verifier-arg=' + token for token in row.get('verifier_args', [])]
+    command += ['--verifier-arg=' + token for token in verifier_args(row, args)]
     command += [str(args.corpus_root / row['path'])]
     directory.parent.mkdir(parents=True, exist_ok=True)
     # The reused benchmark owns timeout, process-group termination, cgroups,
@@ -106,7 +126,7 @@ def run_one(row, args):
     measurement = json.loads(measurement_path.read_text()) if measurement_path.exists() else {}
     log_path = directory / 'stdout.log'
     log = log_path.read_text(errors='replace') if log_path.exists() else ''
-    return dict(**row, outcome=outcome(measurement, log),
+    return dict(**row, seed=getattr(args, 'seed', None), outcome=outcome(measurement, log),
                 solver_cpu_s=measurement.get('solver_cpu_s', {}).get('usage'),
                 total_process_cpu_s=measurement.get('total_process_cpu_s'),
                 wall_s=measurement.get('elapsed_s'),
@@ -230,7 +250,7 @@ def run_warm_once(row, args, lane):
     directory = args.output_directory / relative
     directory.mkdir(parents=True)
     options = ['--prover', 'Z3', '--z3Exe', str(args.z3), '--timeout', str(args.timeout),
-               *args.verifier_arg, *row.get('verifier_args', []), str(args.corpus_root / row['path'])]
+               *verifier_args(row, args), str(args.corpus_root / row['path'])]
     response, failure, context = lane.verify(directory / 'stdout.log', options)
     measurement = dict(response or {}, **context, failure=failure)
     (directory / 'measurement.json').write_text(json.dumps(measurement, indent=2) + '\n')
@@ -240,13 +260,17 @@ def run_warm_once(row, args, lane):
     result = dict(outcome=failure or outcome(dict(
                       returncode=0 if response['success'] else 1, success=response['success']), log),
                   wall_s=None, solver_cpu_s=None, total_process_cpu_s=None, jvm_cpu_s=None,
-                  heap_after_gc_bytes=None, measurement=str(relative / 'measurement.json'), **context)
+                  heap_after_gc_bytes=None, gc=None, gc_s=None, seed=getattr(args, 'seed', None),
+                  measurement=str(relative / 'measurement.json'), **context)
     if response:
         result.update(wall_s=response['wall_s'], solver_cpu_s=response['children_cpu_ticks'] / tick,
                       jvm_cpu_s=response['jvm_cpu_ticks'] / tick,
                       total_process_cpu_s=(response['jvm_cpu_ticks'] +
                                            response['children_cpu_ticks']) / tick,
                       heap_after_gc_bytes=response['heap_after_gc_bytes'])
+        if 'gc' in response:  # runners built before GC accounting omit it
+            result.update(gc=response['gc'], gc_s=sum(
+                c['ms'] for name, c in response['gc'].items() if 'Concurrent' not in name) / 1000)
     return result
 
 
@@ -270,7 +294,7 @@ def execute(args, rows):
                       artifacts={name: dict(path=str(getattr(args, name)),
                                             sha256=sha256(getattr(args, name)))
                                  for name in ('java', 'jar', 'z3')})
-        for option in ('solver_memory_max', 'solver_swap_max'):
+        for option in ('solver_memory_max', 'solver_swap_max', 'seed'):
             value = getattr(args, option, None)
             if value is not None:
                 config[option] = value
@@ -337,6 +361,8 @@ def main(argv=None):
     parser.add_argument('--solver-swap-max', type=int, help='solver leaf memory.swap.max in bytes')
     parser.add_argument('--jvm-arg', action='append', default=[])
     parser.add_argument('--verifier-arg', action='append', default=[])
+    parser.add_argument('--seed', type=int,
+                        help='Z3 ' + ' and '.join(SEED_PARAMETERS) + ', merged into --proverArgs')
     parser.add_argument('--warm', action='store_true',
                         help='verify in one long-lived JVM per job instead of cgroup-isolated processes')
     parser.add_argument('--warm-runs', type=int, default=1,

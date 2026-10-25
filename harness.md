@@ -55,7 +55,7 @@ python3 utils/scripts/viper_corpus/run.py \
   --jobs 6 --timeout 300 --jvm-arg=-Xmx6g
 ```
 
-Use `run.py --help` for defaults. Budget JVM heap and solver memory across all jobs. Repeat `--jvm-arg` and `--verifier-arg` for individual tokens, using `=` for dash-prefixed values, for example `--verifier-arg=--numberOfParallelVerifiers --verifier-arg=1`. The reused benchmark rejects options that would override its accounting, timeout, or temporary-directory configuration. The harness measures Z3, not other solver backends.
+Use `run.py --help` for defaults. Budget JVM heap and solver memory across all jobs. Repeat `--jvm-arg` and `--verifier-arg` for individual tokens, using `=` for dash-prefixed values, for example `--verifier-arg=--numberOfParallelVerifiers --verifier-arg=1`. The reused benchmark rejects options that would override its accounting, timeout, or temporary-directory configuration. The harness measures Z3, not other solver backends. `--seed N` sets Z3's `smt.random_seed` and `sat.random_seed` to N. Silicon accepts one `--proverArgs` string, so the seed joins an existing `--proverArgs` verifier argument or adds one; seed 0 is Z3's default. Results and `run.json` record the seed.
 
 Each scheduled input invokes the existing benchmark CLI in its own process. This keeps signal handling and subprocess accounting separate between parallel jobs. The timeout covers JVM startup and verification; version probes and hashing happen first. `wall_s` is the benchmark's verifier launch-to-shutdown interval, not scheduler queue time or metadata-probe time.
 
@@ -87,7 +87,7 @@ taskset -c 2,3,10,11 python3 utils/scripts/viper_corpus/run.py \
   --warm --warm-runs 2
 ```
 
-`run.py` compiles `WarmRunner.java` with the `javac` and `jar` next to `--java` into `runner.jar` in the output directory and runs `java -cp runner.jar:silicon.jar WarmRunner`. The runner uses only the public frontend API, so it works with older Silicon JARs. Each request is a stdin line: a log path, then Silicon arguments, separated by tabs. Each response is one JSON line with `success`, `wall_s`, JVM CPU ticks, reaped-children CPU ticks, heap after GC, and `fatal`.
+`run.py` compiles `WarmRunner.java` with the `javac` and `jar` next to `--java` into `runner.jar` in the output directory and runs `java -cp runner.jar:silicon.jar WarmRunner`. The runner uses only the public frontend API, so it works with older Silicon JARs. Each request is a stdin line: a log path, then Silicon arguments, separated by tabs. Each response is one JSON line with `success`, `wall_s`, JVM CPU ticks, reaped-children CPU ticks, heap after GC, per-collector GC deltas, and `fatal`.
 
 Results add these fields:
 
@@ -95,6 +95,7 @@ Results add these fields:
 - `jvm_cpu_s`: the runner's own CPU, which includes JIT and GC threads.
 - `total_process_cpu_s`: the sum of `solver_cpu_s` and `jvm_cpu_s`.
 - `heap_after_gc_bytes`: used heap after `System.gc()`.
+- `gc`: per-collector `count` and `ms` from `GarbageCollectorMXBean` across the request, excluding the `System.gc()` after it. `gc_s` sums the collectors whose name lacks `Concurrent`; for G1 that is pause time. Runners built from an older `WarmRunner.java` omit both.
 - `lane`, `runner_start`, `runner_served`, `after_restart`: the job slot, its runner start count, the number of files this runner verified before, and whether the runner has been restarted.
 - `warmup`: the same fields for earlier `--warm-runs` verifications. The top-level fields describe the last run.
 

@@ -196,6 +196,8 @@ for line in sys.stdin:
     open(log, 'w').write('Silicon found 1 error' if name == 'bad.vpr' else 'ok')
     print(json.dumps(dict(success=name == 'a.vpr', wall_s=0.5, jvm_cpu_ticks=200,
                           children_cpu_ticks=100, heap_after_gc_bytes=7,
+                          gc={'G1 Young Generation': dict(count=2, ms=250),
+                              'G1 Concurrent GC': dict(count=1, ms=900)},
                           fatal=name == 'fatal.vpr')), flush=True)
 ''')
         java.chmod(0o755)
@@ -228,6 +230,9 @@ for line in sys.stdin:
         self.assertEqual(results[0]['solver_cpu_s'], 100 / tick)
         self.assertEqual(results[0]['total_process_cpu_s'], 300 / tick)
         self.assertIsNone(results[2]['wall_s'])
+        self.assertEqual(results[0]['gc_s'], 0.25)
+        self.assertEqual(results[0]['gc']['G1 Concurrent GC'], dict(count=1, ms=900))
+        self.assertIsNone(results[2]['gc_s'])
         args.warm_runs = 2
         lanes = run.queue.Queue()
         lanes.put(run.Lane(args, 1, java))
@@ -235,6 +240,22 @@ for line in sys.stdin:
         record = run.run_warm(rows[0], args, lanes)
         self.assertEqual(record['runner_served'], 1)
         self.assertEqual([w['runner_served'] for w in record['warmup']], [0])
+
+    def test_seed_joins_the_single_prover_arguments_string(self):
+        args, rows = self.args()
+        row = dict(rows[0], verifier_args=['--assumeInjectivityOnInhale'])
+        self.assertEqual(run.verifier_args(row, args), ['--assumeInjectivityOnInhale'])
+        args.seed = 2
+        seeds = 'smt.random_seed=2 sat.random_seed=2'
+        self.assertEqual(run.verifier_args(row, args),
+                         ['--assumeInjectivityOnInhale', '--proverArgs', seeds])
+        args.verifier_arg = ['--proverArgs', 'memory_max_size=3000', '--timeout', '9']
+        self.assertEqual(run.verifier_args(row, args),
+                         ['--proverArgs', 'memory_max_size=3000 ' + seeds, '--timeout', '9',
+                          '--assumeInjectivityOnInhale'])
+        args.verifier_arg = ['--proverArgs=memory_max_size=3000']
+        self.assertEqual(run.verifier_args(rows[0], args),
+                         ['--proverArgs=memory_max_size=3000 ' + seeds])
 
     def test_compare_pairs_outcomes_missing_inputs_and_rankings(self):
         def row(path, cpu, wall, outcome='verified', sha='hash'):

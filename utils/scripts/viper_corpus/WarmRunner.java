@@ -4,11 +4,13 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.PrintStream;
+import java.lang.management.GarbageCollectorMXBean;
 import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.Arrays;
+import java.util.List;
 
 import ch.qos.logback.classic.Logger;
 import scala.Option;
@@ -53,6 +55,7 @@ public final class WarmRunner {
             String[] fields = line.split("\t", -1);
             String[] args = Arrays.copyOfRange(fields, 1, fields.length);
             long[] before = procStat();
+            long[][] gcBefore = gcStat();
             long start = System.nanoTime();
             boolean success = false;
             Throwable fatal = null;
@@ -77,15 +80,39 @@ public final class WarmRunner {
             }
             double wall = (System.nanoTime() - start) / 1e9;
             long[] after = procStat();
+            long[][] gcAfter = gcStat();
             System.gc();
             long heap = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getUsed();
             protocol.println(String.format(
                 "{\"success\":%b,\"wall_s\":%.6f,\"jvm_cpu_ticks\":%d,\"children_cpu_ticks\":%d,"
-                    + "\"heap_after_gc_bytes\":%d,\"fatal\":%b}",
-                success, wall, after[0] - before[0], after[1] - before[1], heap, fatal != null));
+                    + "\"heap_after_gc_bytes\":%d,\"gc\":%s,\"fatal\":%b}",
+                success, wall, after[0] - before[0], after[1] - before[1], heap,
+                gcJson(gcBefore, gcAfter), fatal != null));
             // An Error may leave shared JVM state broken; let the harness start a fresh runner.
             if (fatal != null) System.exit(2);
         }
+    }
+
+    /** Collection count and accumulated milliseconds of each collector, in bean order. */
+    private static long[][] gcStat() {
+        List<GarbageCollectorMXBean> beans = ManagementFactory.getGarbageCollectorMXBeans();
+        long[][] stat = new long[beans.size()][];
+        for (int i = 0; i < stat.length; i++)
+            stat[i] = new long[] {beans.get(i).getCollectionCount(), beans.get(i).getCollectionTime()};
+        return stat;
+    }
+
+    /** {"collector":{"count":n,"ms":t},...} of the change across the request. */
+    private static String gcJson(long[][] before, long[][] after) {
+        List<GarbageCollectorMXBean> beans = ManagementFactory.getGarbageCollectorMXBeans();
+        StringBuilder json = new StringBuilder("{");
+        for (int i = 0; i < after.length; i++) {
+            if (i > 0) json.append(',');
+            json.append('"').append(beans.get(i).getName().replace("\\", "\\\\").replace("\"", "\\\""))
+                .append("\":{\"count\":").append(after[i][0] - before[i][0])
+                .append(",\"ms\":").append(after[i][1] - before[i][1]).append('}');
+        }
+        return json.append('}').toString();
     }
 
     /** utime+stime and reaped-children cutime+cstime of this process, in clock ticks. */
