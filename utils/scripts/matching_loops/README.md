@@ -33,6 +33,8 @@ Use `--help` to see all options.
 
 ## Report
 
+The header gives the time in check-sats, summed over Z3 processes. If Z3 printed nothing in the last 10 s or more of the run, it says so: Silicon spent that time outside the prover, and no query explains it.
+
 For each query, the report gives:
 
 - the original time and result, and the replay's time, result, instances, max generation and memory

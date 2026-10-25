@@ -216,6 +216,7 @@ class Tests(unittest.TestCase):
         self.assertEqual([c['qid'] for c in query['culprits']], ['shift'])
         self.assertEqual(query['quantifiers'][0]['self_feeding'], ['(f (+ x 1))'])
         self.assertIn('## 7 query 1', (self.root / 'report.md').read_text())
+        self.assertAlmostEqual(report['check_sat_seconds'], 2.01)
 
 
 if __name__ == '__main__':

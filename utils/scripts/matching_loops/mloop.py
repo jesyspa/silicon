@@ -110,6 +110,16 @@ def queries(tap, end=None):
     return records
 
 
+def last_output(tap):
+    """Unix time of the last Z3 output line in any process, or None."""
+    stamps = []
+    for path in tap.glob('*.out'):
+        lines = path.read_text(errors='replace').splitlines()
+        if lines:
+            stamps.append(float(lines[-1].partition(' ')[0]))
+    return max(stamps, default=None)
+
+
 def cut(tap_in, line, destination, history, timeout_ms, final=True, caps=None):
     """Writes the input up to the check-sat on `line` as a standalone replay script.
 
@@ -389,6 +399,11 @@ def write_report(out, meta, results):
              f"- Jar: {meta['jar']}", f"- Silicon: exit {meta['run']['code']}, {meta['run']['wall_s']} s wall",
              f"- Queries: {meta['queries']} in {meta['processes']} Z3 processes; "
              f"analysed the {len(results)} slowest (at least {meta['min_seconds']} s)",
+             f"- Time in check-sats, summed over processes: {meta.get('check_sat_seconds')} s"]
+    if (meta.get('idle_at_end') or 0) > 10:
+        lines.append(f"- No Z3 output in the last {meta['idle_at_end']} s of the run: Silicon spent that time "
+                     "outside the prover")
+    lines += [
              f"- Replays: seed {meta['seed']}, eager threshold {meta['eager_threshold']}, "
              f"limit {meta['replay_timeout']} s", '']
     for r in results:
@@ -496,7 +511,10 @@ def main(argv=None):
         results.append(analyse_query(args, args.out, record, tap, sources, threshold, records))
         print(f"{record['process']} q{record['index']}: {record['seconds']:.1f} s -> {results[-1]['verdict']} "
               + ' '.join(c['qid'] for c in results[-1]['culprits']), file=sys.stderr)
+    last = last_output(tap)
     meta = dict(vpr=str(args.vpr), jar=run.get('jar'), run=run, queries=len(records),
+                check_sat_seconds=round(sum(r['seconds'] for r in records), 2),
+                idle_at_end=round(run['end'] - last, 2) if run.get('end') and last else None,
                 processes=len(list(tap.glob('*.in'))), min_seconds=args.min_seconds, seed=args.seed,
                 eager_threshold=threshold if results else None, replay_timeout=args.replay_timeout)
     write_report(args.out, meta, results)
