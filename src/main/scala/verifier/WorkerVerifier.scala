@@ -43,7 +43,6 @@ class WorkerVerifier(mainVerifier: MainVerifier,
   }
 
   override def stop(): Unit = {
-    super.stop()
-    statefulSubcomponents foreach (_.stop())
+    Cleanup.run(((() => super.stop()) +: statefulSubcomponents.map(component => () => component.stop())): _*)
   }
 }

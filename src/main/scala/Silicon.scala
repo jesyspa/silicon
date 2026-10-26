@@ -20,7 +20,7 @@ import viper.silver.verifier.{AbstractVerificationError => SilAbstractVerificati
 import viper.silicon.interfaces.Failure
 import viper.silicon.logger.{MemberSymbExLogger, SymbExLogger}
 import viper.silicon.reporting.{MultiRunRecorders, condenseToViperResult}
-import viper.silicon.verifier.DefaultMainVerifier
+import viper.silicon.verifier.{Cleanup, DefaultMainVerifier}
 import viper.silicon.decider.{Cvc5ProverStdIO, Z3ProverStdIO}
 import viper.silver.cfg.silver.SilverCfg
 import viper.silver.logger.ViperStdOutLogger
@@ -151,8 +151,10 @@ class Silicon(val reporter: Reporter, private var debugInfo: Seq[(String, Any)] 
   }
 
   def stop(): Unit = {
-    if (verifier != null) verifier.stop()
-    if (symbExLog != null) symbExLog.close()
+    Cleanup.run(
+      () => if (verifier != null) verifier.stop(),
+      () => if (symbExLog != null) symbExLog.close()
+    )
   }
 
   /** Verifies a given SIL program and returns a sequence of verification errors.
