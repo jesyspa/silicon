@@ -13,77 +13,84 @@ import viper.silicon.logger.records.scoping.{CloseScopeRecord, OpenScopeRecord}
 import viper.silicon.logger.records.structural.{BranchingRecord, JoiningRecord}
 import viper.silicon.state.terms.Not
 
-import scala.annotation.unused
-
 class SimpleTreeRenderer extends Renderer[MemberSymbExLog, String] {
   def render(memberList: Iterable[MemberSymbExLog]): String = {
-    var res = ""
-    for (m <- memberList) {
-      res = res + renderMember(m) + "\n"
+    val result = new StringBuilder
+    memberList.foreach { member =>
+      result.append(renderMember(member)).append('\n')
     }
-    res
+    result.toString
   }
 
   def renderMember(member: MemberSymbExLog): String = {
-    // val filteredLog = filterEmptyScopes(member.log)
-    toSimpleTree(member.log, 0, 0)
+    val result = new StringBuilder
+    appendTree(member.log, result)
+    result.toString
   }
 
-  /**
-    *
-    * @param log
-    * @param minN specifies the minimal indentation level; this is necessary to ignore certain close scope records
-    *             on a branch in order records on the branch have a higher indentation level than the branch indicator
-    * @param n
-    * @return
-    */
-  private def toSimpleTree(log: Seq[SymbolicRecord], minN: Int, n: Int): String = {
-    var res = ""
-    var indentLevel = n
-    for (record <- log) {
-      record match {
-        case _: OpenScopeRecord => indentLevel = indentLevel + 1
-        case _: CloseScopeRecord => indentLevel = Math.max(minN, indentLevel - 1)
-        case br: BranchingRecord => res = res + toSimpleTree(br, minN, indentLevel)
-        case jr: JoiningRecord => res = res + toSimpleTree(jr, minN, indentLevel)
-        case dr: DataRecord => res = res + toSimpleTree(dr, minN, indentLevel)
+  private sealed trait Frame
+  private final class Records(val records: Iterator[SymbolicRecord], val minIndent: Int,
+                              var indent: Int) extends Frame
+  private final class Branches(val record: BranchingRecord, val indent: Int,
+                               var index: Int = 0) extends Frame
+
+  /** Append directly to one output buffer. Explicit continuation frames keep deeply nested branch points off the
+    * JVM stack, and preserve the enclosing scope's indentation when a branch finishes. */
+  private def appendTree(log: Seq[SymbolicRecord], result: StringBuilder): Unit = {
+    var pending: List[Frame] = new Records(log.iterator, 0, 0) :: Nil
+    while (pending.nonEmpty) {
+      pending.head match {
+        case frame: Records =>
+          if (!frame.records.hasNext) {
+            pending = pending.tail
+          } else {
+            frame.records.next() match {
+              case _: OpenScopeRecord => frame.indent += 1
+              case _: CloseScopeRecord => frame.indent = Math.max(frame.minIndent, frame.indent - 1)
+              case br: BranchingRecord => pending = new Branches(br, frame.indent) :: pending
+              case _: JoiningRecord =>
+                appendIndent(result, frame.indent)
+                result.append("Join\n")
+              case dr: DataRecord =>
+                appendIndent(result, frame.indent)
+                result.append(dr.toString).append('\n')
+            }
+          }
+
+        case frame: Branches =>
+          val branches = frame.record.getBranchInfos
+          if (frame.index == branches.length) {
+            pending = pending.tail
+          } else {
+            val index = frame.index
+            frame.index += 1
+            appendIndent(result, frame.indent)
+            result.append("Branch ")
+            if (branches.length <= 2 && frame.record.condition.isDefined) {
+              val condition = if (index == 0) frame.record.condition.get else Not(frame.record.condition.get)
+              result.append(condition)
+            } else {
+              result.append(index + 1)
+            }
+            result.append(":\n")
+            appendIndent(result, frame.indent + 1)
+            val branch = branches(index)
+            if (branch.isReachable) {
+              result.append("comment: Reachable\n")
+              pending = new Records(branch.records.iterator, frame.indent + 1, frame.indent + 1) :: pending
+            } else {
+              result.append("comment: Unreachable\n")
+            }
+          }
       }
     }
-    res
   }
 
-  private def getIndent(indentLevel: Int): String = {
-    "  " * indentLevel
-  }
-
-  private def toSimpleTree(dr: DataRecord, @unused minN: Int, n: Int): String = {
-    val indent = getIndent(n)
-    s"$indent$dr\n"
-  }
-
-  private def toSimpleTree(br: BranchingRecord, @unused minN: Int, n: Int): String = {
-    val indent = getIndent(n)
-    var res = ""
-    val branches = br.getBranches
-    for (branchIndex <- branches.indices) {
-      if (branches.length <= 2 && br.condition.isDefined) {
-        val condition = if (branchIndex == 0)  br.condition.get else Not(br.condition.get)
-        res = s"${res}${indent}Branch ${condition}:\n"
-      } else {
-        res = s"${res}${indent}Branch ${branchIndex + 1}:\n"
-      }
-      val branch = branches(branchIndex)
-      if (br.isReachable(branchIndex)) {
-        res = s"${res}${getIndent(n + 1)}comment: Reachable\n"
-        res = res + toSimpleTree(branch, n + 1, n + 1)
-      } else {
-        res = s"${res}${getIndent(n + 1)}comment: Unreachable\n"
-      }
+  private def appendIndent(result: StringBuilder, level: Int): Unit = {
+    var i = 0
+    while (i < level) {
+      result.append("  ")
+      i += 1
     }
-    res
-  }
-
-  private def toSimpleTree(@unused jr: JoiningRecord, @unused minN: Int, n: Int): String = {
-    s"${getIndent(n)}Join\n"
   }
 }
