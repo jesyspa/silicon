@@ -61,6 +61,9 @@ object evaluator extends EvaluationRules {
   import consumer._
   import producer._
 
+  /* Experimental: drop self-matching trigger sets from auxiliary quantifiers. */
+  private val dropSelfMatchingAuxTriggers = java.lang.Boolean.getBoolean("silicon.exp.auxSelfMatch")
+
   def evals(s: State, es: Seq[ast.Exp], pvef: ast.Exp => PartialVerificationError, v: Verifier)
            (Q: (State, List[Term], Option[List[ast.Exp]], Verifier) => VerificationResult)
            : VerificationResult =
@@ -1094,8 +1097,11 @@ object evaluator extends EvaluationRules {
         var finalState = s3
         val es2AndTriggerResult = evals(s3, es2, _ => pve, v2)((s4, ts2, es2New, v3) => {
           evalTriggers(s4, optTriggers.getOrElse(Nil), pve, v3)((s5, tTriggers, _) => { // TODO: v4 isn't forward - problem?
-            val (auxGlobals, auxNonGlobalQuants) =
+            val (auxGlobals, auxNonGlobalQuants0) =
               v3.decider.pcs.after(preMark).quantified(quant, tVars, tTriggers, s"$name-aux", isGlobal = false, bc)
+            val auxNonGlobalQuants =
+              if (dropSelfMatchingAuxTriggers) auxNonGlobalQuants0.map(v3.quantifierSupporter.dropSelfMatchingTriggers)
+              else auxNonGlobalQuants0
             val auxExps =
               Option.when(debugOn)(v3.decider.pcs.after(preMark).quantifiedExp(quant, varPairs map (_._2.get), tVars, optTriggers.getOrElse(Nil), tTriggers, s"$name-aux", isGlobal = false, bc))
             val additionalPossibleTriggers: Map[ast.Exp, Term] =

@@ -18,6 +18,8 @@ trait QuantifierSupporter {
 
   def makeTriggersHeapIndependent(q: Quantification, fresh: (String, Sort, Option[PType]) => Var): Seq[Quantification]
 
+  def dropSelfMatchingTriggers(q: Quantification): Quantification
+
   def detectQuantificationProblems(quantification: Quantification): Seq[String]
 }
 
@@ -100,6 +102,53 @@ class DefaultQuantifierSupporter(triggerGenerator: TriggerGenerator) extends Qua
           Seq(Trigger(ts.map(replaceHeapDeps(_,m)))),
           q.name,
           q.isGlobal)})
+  }
+
+  /* A trigger set is self-matching if one of its terms matches an unguarded body term other than itself, binding some
+   * quantified variable to a term that contains a quantified variable but is not one. Each instance then yields
+   * a new term the trigger matches, e.g. {down(r)} against down(inv(r, 0)). Such trigger sets are dropped,
+   * unless no trigger set would remain.
+   */
+  def dropSelfMatchingTriggers(q: Quantification): Quantification = {
+    val vars = q.vars.toSet
+
+    def matchTerm(p: Term, t: Term, subst: Map[Var, Term]): Option[Map[Var, Term]] = p match {
+      case x: Var if vars.contains(x) =>
+        subst.get(x) match {
+          case Some(bound) => Option.when(bound == t)(subst)
+          case None => Some(subst + (x -> t))
+        }
+      case _ if p.getClass != t.getClass || p.subterms.length != t.subterms.length => None
+      case _ =>
+        p.subterms.zip(t.subterms).foldLeft(Option(subst)) {
+          case (Some(acc), (pi, ti)) => matchTerm(pi, ti, acc)
+          case (None, _) => None
+        }
+    }
+
+    def isGrowing(t: Term): Boolean =
+      !t.isInstanceOf[Var] && t.existsDefined { case x: Var if vars.contains(x) => }
+
+    /* Terms under an implication whose antecedent contains the trigger term p are skipped: an instance only
+     * makes them relevant when the instantiated trigger term holds, so they cannot drive an unbounded loop.
+     */
+    def unguardedTerms(t: Term, p: Term): Seq[Term] = t match {
+      case Implies(a, _) if a.topLevelConjuncts.contains(p) => a +: a.subterms.flatMap(unguardedTerms(_, p))
+      case _ => t +: t.subterms.flatMap(unguardedTerms(_, p))
+    }
+
+    def isSelfMatching(trigger: Trigger): Boolean =
+      trigger.p.exists(p => unguardedTerms(q.body, p).distinct.exists(t =>
+        t != p && (matchTerm(p, t, Map.empty) match {
+          case Some(subst) =>
+            val (xs, ts) = subst.toSeq.unzip
+            ts.exists(isGrowing) && p.replace(xs, ts) == t
+          case None => false
+        })))
+
+    val kept = q.triggers.filterNot(isSelfMatching)
+    if (kept.isEmpty || kept.length == q.triggers.length) q
+    else Quantification(q.q, q.vars, q.body, kept, q.name, q.isGlobal, q.weight)
   }
 
   def detectQuantificationProblems(quantification: Quantification): Seq[String] = {
