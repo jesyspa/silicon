@@ -23,6 +23,7 @@ object Z3ProverStdIO {
   val staticPreamble = "/z3config.smt2"
   val startUpArgs = Seq("-smt2", "-in")
   val randomizeSeedsOptions = Seq("sat.random_seed", "nlsat.seed", "fp.spacer.random_seed", "smt.random_seed", "sls.random_seed")
+  val smtSeedArg = """(?:^|\s)smt\.random_seed=(\d+)""".r
 }
 
 class Z3ProverStdIO(uniqueId: String,
@@ -58,6 +59,17 @@ class Z3ProverStdIO(uniqueId: String,
       }
       readSuccess()
     }
+  }
+
+  /* Z3 takes the last value of a repeated command-line option, so the retry seed is appended. It differs from
+   * the seed of the first attempt and of earlier retries. Seeds set in the preamble, with --proverConfigArgs or
+   * --proverRandomizeSeeds, override it.
+   */
+  override protected def retryArgs(args: Option[String], retry: Int): Option[String] = {
+    val seed = args.flatMap(a => Z3ProverStdIO.smtSeedArg.findAllMatchIn(a).toSeq.lastOption)
+                   .map(_.group(1).toLong).getOrElse(0L)
+    val retrySeed = (seed + retry) % (1L << 32)
+    Some((args.filter(_.trim.nonEmpty).toSeq :+ s"smt.random_seed=$retrySeed sat.random_seed=$retrySeed").mkString(" "))
   }
 
   protected def getProverPath: Path = {

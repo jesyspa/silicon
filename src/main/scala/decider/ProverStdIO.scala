@@ -40,6 +40,10 @@ abstract class ProverStdIO(uniqueId: String,
   protected var allDecls: Seq[Decl] = Seq()
   protected var allEmits: Seq[String] = Seq()
   protected var userArgs: Option[String] = None
+  /* The command-line arguments of the running prover process; see [[retryArgs]] */
+  protected var processArgs: Option[String] = None
+  /* The number of assertions retried in a fresh prover since the prover was started */
+  protected var retries: Int = 0
   /* The commands that make up the prover's current state, one buffer per push-pop scope, such that
    * the state can be rebuilt after a prover restart. See [[restartAfterMemoryOut]].
    */
@@ -48,6 +52,8 @@ abstract class ProverStdIO(uniqueId: String,
   /* Whether the current refutation attempt is retried in a fresh prover if it reaches its timeout */
   protected var isRetryableAttempt: Boolean = false
   protected var lastCheckReachedTimeout: Boolean = false
+  /* The prover's answer to the most recent refutation attempt: unsat, sat or unknown */
+  protected var lastCheckSatAnswer: String = _
   /* Whether the prover was restarted after running out of memory since the last refutation attempt */
   protected var ranOutOfMemorySinceLastCheck: Boolean = false
   /* The most recent command sent to the prover, to be resent if the prover runs out of memory on it */
@@ -107,6 +113,8 @@ abstract class ProverStdIO(uniqueId: String,
     pushPopScopeDepth = 0
     lastTimeout = -1
     userArgs = userArgsString
+    processArgs = userArgsString
+    retries = 0
     scopedCommands = Vector(mutable.ArrayBuffer())
     ranOutOfMemorySinceLastCheck = false
     suspendedFromDepth = None
@@ -303,8 +311,9 @@ abstract class ProverStdIO(uniqueId: String,
     val retryTimeout = Verifier.config.assertRetryTimeout()
     val (result, duration) =
       if (timeout.isEmpty && Verifier.config.proverTimeout == 0 && retryTimeout > 0) {
-        /* Z3's search depends on the queries that preceded it in the same prover. An assertion that it
-         * does not prove quickly is retried, without a timeout, in a fresh prover with the same state.
+        /* Z3's search depends on the queries that preceded it in the same prover and on its random seed.
+         * An assertion that it does not prove quickly is retried, without a timeout, in a fresh prover
+         * with the same state and a different seed.
          */
         isRetryableAttempt = true
         val (firstResult, firstDuration) =
@@ -313,8 +322,17 @@ abstract class ProverStdIO(uniqueId: String,
           (firstResult, firstDuration)
         } else {
           comment(s"Retrying the assertion in a fresh prover")
+          retries += 1
+          processArgs = retryArgs(userArgs, retries)
+          val restartStart = System.currentTimeMillis()
           restartAndReplay()
+          val restartDuration = System.currentTimeMillis() - restartStart
           val (retryResult, retryDuration) = assertInMode(goal, None)
+          val answer = if (lastCheckRanOutOfMemory) "out of memory" else lastCheckSatAnswer
+          val msg = (s"Prover $uniqueId retried an assertion in a fresh prover: first attempt $firstDuration ms, "
+                     + s"restart and replay $restartDuration ms, retry $retryDuration ms, answer $answer")
+          reporter report InternalWarningMessage(msg)
+          logger info msg
           (retryResult, firstDuration + retryDuration)
         }
       } else {
@@ -326,6 +344,11 @@ abstract class ProverStdIO(uniqueId: String,
 
     result
   }
+
+  /* The command-line arguments for a prover that retries an assertion for the [[retry]]-th time, such that
+   * the retry does not repeat the search of the first attempt
+   */
+  protected def retryArgs(args: Option[String], retry: Int): Option[String] = args
 
   private def assertInMode(goal: String, timeout: Option[Int]): (Boolean, Long) = {
     Verifier.config.assertionMode() match {
@@ -559,6 +582,7 @@ abstract class ProverStdIO(uniqueId: String,
   protected def readUnsat(): Boolean = {
     val outOfMemoryBefore = ranOutOfMemorySinceLastCheck
     val result = readCheckSatResult()
+    lastCheckSatAnswer = result
     /* A memory-out on this check is attributed to it, not to the next one */
     ranOutOfMemorySinceLastCheck = false
 
@@ -619,7 +643,7 @@ abstract class ProverStdIO(uniqueId: String,
     prover.waitFor(10, TimeUnit.SECONDS)
     input.close()
     output.close()
-    prover = createProverInstance(userArgs)
+    prover = createProverInstance(processArgs)
     connectToProver()
     lastTimeout = -1
     suspendedFromDepth = None
