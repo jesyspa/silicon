@@ -11,6 +11,7 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 
 import ch.qos.logback.classic.Logger;
 import scala.Option;
@@ -83,7 +84,7 @@ public final class WarmRunner {
             long[][] gcAfter = gcStat();
             System.gc();
             long heap = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getUsed();
-            protocol.println(String.format(
+            protocol.println(String.format(Locale.ROOT,
                 "{\"success\":%b,\"wall_s\":%.6f,\"jvm_cpu_ticks\":%d,\"children_cpu_ticks\":%d,"
                     + "\"heap_after_gc_bytes\":%d,\"gc\":%s,\"fatal\":%b}",
                 success, wall, after[0] - before[0], after[1] - before[1], heap,

@@ -4,6 +4,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import fcntl
 import json
+import math
 import os
 import queue
 import select
@@ -14,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -139,6 +141,32 @@ def run_one(row, args):
 RUNNER = Path(__file__).with_name('WarmRunner.java')
 HANG_GRACE_S = 30
 OOM_EXIT = 3  # -XX:+ExitOnOutOfMemoryError
+MAX_RESPONSE_BYTES = 1024 * 1024
+
+
+class RunnerProtocolError(ValueError):
+    """A runner response cannot safely be attributed to a request."""
+
+
+def validate_response(response):
+    """Reject malformed measurements before they enter results or analysis."""
+    for key in ('success', 'fatal'):
+        if type(response.get(key)) is not bool:
+            raise RunnerProtocolError('invalid runner field: ' + key)
+    for key in ('wall_s', 'jvm_cpu_ticks', 'children_cpu_ticks', 'heap_after_gc_bytes'):
+        value = response.get(key)
+        types = (int, float) if key == 'wall_s' else (int,)
+        if (type(value) not in types or value < 0
+                or (type(value) is float and not math.isfinite(value))):
+            raise RunnerProtocolError('invalid runner field: ' + key)
+    if 'gc' in response:
+        if not isinstance(response['gc'], dict):
+            raise RunnerProtocolError('invalid runner field: gc')
+        for counter in response['gc'].values():
+            if not isinstance(counter, dict) or any(
+                    type(counter.get(key)) is not int or counter[key] < 0
+                    for key in ('count', 'ms')):
+                raise RunnerProtocolError('invalid runner GC counter')
 
 
 def build_runner(args):
@@ -192,18 +220,74 @@ class Lane:
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr, start_new_session=True)
         stderr.close()
         self.starts, self.served = self.starts + 1, 0
-        if self.read(60) != {'ready': True}:
-            raise OSError('warm runner did not start; see ' + stderr.name)
-        # systemd-run executes the runner in place, so the scope is the runner's cgroup.
-        self.cgroup = process_cgroup(self.process.pid)
+        try:
+            os.set_blocking(self.process.stdin.fileno(), False)
+            os.set_blocking(self.process.stdout.fileno(), False)
+            if self.read(60) != {'ready': True}:
+                raise OSError('warm runner did not start; see ' + stderr.name)
+            # systemd-run executes the runner in place, so the scope is the runner's cgroup.
+            self.cgroup = process_cgroup(self.process.pid)
+        except BaseException:
+            self.stop()
+            raise
 
     def read(self, timeout):
         """Return the next response, {} if the runner exited, or None after the timeout."""
-        ready, _, _ = select.select([self.process.stdout], [], [], timeout)
-        if not ready:
-            return None
-        line = self.process.stdout.readline()
-        return json.loads(line) if line.endswith(b'\n') else {}
+        return self.read_until(time.monotonic() + timeout)
+
+    def read_until(self, deadline):
+        # Never mix buffered readline with select: a partial line can block past
+        # the deadline, and read-ahead can hide bytes from select on the next call.
+        data = bytearray()
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            ready, _, _ = select.select([self.process.stdout], [], [], remaining)
+            if not ready:
+                return None
+            try:
+                chunk = os.read(self.process.stdout.fileno(), 65536)
+            except BlockingIOError:
+                continue
+            if not chunk:
+                if data:
+                    raise RunnerProtocolError('runner exited with an incomplete response')
+                return {}
+            data.extend(chunk)
+            if len(data) > MAX_RESPONSE_BYTES:
+                raise RunnerProtocolError('runner response exceeds size limit')
+            if b'\n' in data:
+                line, rest = data.split(b'\n', 1)
+                if rest:
+                    raise RunnerProtocolError('unsolicited runner output after response')
+                try:
+                    response = json.loads(line)
+                except (ValueError, UnicodeError) as exc:
+                    raise RunnerProtocolError('invalid runner JSON') from exc
+                if not isinstance(response, dict) or not response:
+                    raise RunnerProtocolError('runner response must be a nonempty object')
+                return response
+
+    def send(self, log, options, deadline):
+        """Write a request without letting a stuck runner block the lane."""
+        fields = [str(log), *options]
+        if any(any(c in field for c in '\t\r\n') for field in fields):
+            raise ValueError('warm runner request fields cannot contain tabs or newlines')
+        data = memoryview(('\t'.join(fields) + '\n').encode())
+        while data:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            _, ready, _ = select.select([], [self.process.stdin], [], remaining)
+            if not ready:
+                return False
+            try:
+                written = os.write(self.process.stdin.fileno(), data)
+            except BlockingIOError:
+                continue
+            data = data[written:]
+        return True
 
     def stop(self):
         """Kill the runner and its solvers; return the runner's exit status."""
@@ -225,13 +309,30 @@ class Lane:
         context = dict(lane=self.index, runner_start=self.starts, runner_served=self.served,
                        after_restart=self.starts > 1)
         self.served += 1
+        response, failure = self.request(log, options)
+        return response, failure, context
+
+    def request(self, log, options):
+        """Exchange one request on a started runner; discard it on any failure.
+
+        Warm-ups use this same boundary so an unfinished warm-up can never be
+        mistaken for a measured input's response. This method does not restart.
+        """
         kills = oom_kills(self.cgroup)
+        deadline = time.monotonic() + self.args.timeout + HANG_GRACE_S
+        protocol_error = None
         try:
-            self.process.stdin.write(('\t'.join([str(log), *options]) + '\n').encode())
-            self.process.stdin.flush()
+            sent = self.send(log, options, deadline)
+            response = self.read_until(deadline) if sent else None
+            if response:
+                validate_response(response)
         except BrokenPipeError:
-            pass
-        response = self.read(self.args.timeout + HANG_GRACE_S)
+            response = {}
+        except RunnerProtocolError as exc:
+            response, protocol_error = {}, str(exc)
+        except BaseException:
+            self.stop()
+            raise
         try:
             killed = oom_kills(self.cgroup) > kills
         except FileNotFoundError:  # systemd removed the scope of a dead runner
@@ -239,14 +340,18 @@ class Lane:
         if response:
             if response['fatal'] or killed:
                 self.stop()
-            return response, 'oom' if killed else None, context
-        hung = response is None and not killed
+            return response, 'oom' if killed else 'crash' if response['fatal'] else None
+        exited = self.process.poll()
         code = self.stop()
-        # A SIGKILL we did not send is the OOM killer choosing the runner over its
-        # solver; the scope, and with it memory.events, is then already gone.
-        oom = killed or code in (OOM_EXIT, -signal.SIGKILL)
-        failure = 'timeout' if hung else 'oom' if oom else 'crash'
-        return None, failure, context
+        # Only an already observed SIGKILL can be attributed to an external kill;
+        # stop() itself sends SIGKILL when discarding a broken protocol stream.
+        oom = killed or code == OOM_EXIT or exited == -signal.SIGKILL
+        failure = 'oom' if oom else 'timeout' if response is None else 'crash'
+        if protocol_error:
+            # Keep diagnostics with the runner log, not in the JSON protocol.
+            with (self.args.output_directory / f'runner-{self.label}.log').open('a') as log_file:
+                log_file.write('Runner protocol error: ' + protocol_error + '\n')
+        return None, failure
 
 
 def run_warm_once(row, args, lane):

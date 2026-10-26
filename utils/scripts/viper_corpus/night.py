@@ -10,6 +10,7 @@ memory-limited scope. Results: <output>/results.jsonl, one record per
 after the running tasks.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import datetime
 import fcntl
 import json
@@ -81,14 +82,14 @@ class NightLane(run.Lane):
         directory.mkdir(exist_ok=True)
         for options in self.warmup:
             log = directory / f'{self.label}-{self.starts}.log'
-            self.process.stdin.write(('\t'.join([str(log), *options]) + '\n').encode())
-            self.process.stdin.flush()
-            response = self.read(self.args.timeout + run.HANG_GRACE_S)
+            response, failure = self.request(log, options)
             if response:  # analyze.py counts warm-up wall against the runner's GC log
                 with (directory / 'wall.jsonl').open('a') as sink:
                     sink.write(json.dumps(dict(runner=self.label, wall_s=response['wall_s'])) + '\n')
-            if not response or response.get('fatal'):
-                break  # the next request restarts the runner
+            if failure or not response or response['fatal']:
+                self.stop()
+                raise OSError(f'warm-up failed for {self.label}: {failure or "fatal runner error"}; '
+                              f'see {log}')
 
 
 def execute(args, arms, manifests):
@@ -137,6 +138,7 @@ def execute(args, arms, manifests):
                    *args.verifier_arg, str(args.corpus_root / path)]
                   for path in args.warmup for _ in range(args.warmup_runs)]
         write = threading.Lock()
+        failed = threading.Event()
 
         def say(*words):
             with write:
@@ -152,7 +154,7 @@ def execute(args, arms, manifests):
                         [*w[:-1], *arm['verifier_arg'], w[-1]] for w in warmup],
                     jvm_arg=[*args.jvm_arg, *arm['jvm_arg'], f'-Xlog:gc:file={gc}:uptime'])
             try:
-                while True:
+                while not failed.is_set():
                     if (args.output_directory / 'STOP').exists():
                         return say('lane', index, 'STOP')
                     if not in_window(args.window, datetime.datetime.now()):
@@ -171,18 +173,21 @@ def execute(args, arms, manifests):
                         sink.flush()
                         os.fsync(sink.fileno())
                     say(record['outcome'], name, seed, f'{record["wall_s"] or 0:.1f}s', row['path'])
+            except BaseException:
+                failed.set()
+                raise
             finally:
                 for l in lanes.values():
                     l.stop()
 
         with results.open('a') as sink, (args.output_directory / 'night.log').open('a') as log:
             say('start', tasks.qsize(), 'tasks')
-            threads = [threading.Thread(target=lane, args=(i, cpus))
-                       for i, cpus in enumerate(args.lanes)]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
+            # Propagate worker failures to the CLI; joining raw threads otherwise
+            # reports a successful run after a warm-up or protocol failure.
+            with ThreadPoolExecutor(max_workers=len(args.lanes)) as pool:
+                futures = [pool.submit(lane, i, cpus) for i, cpus in enumerate(args.lanes)]
+                for future in futures:
+                    future.result()
             say('end', tasks.qsize(), 'tasks left')
 
 

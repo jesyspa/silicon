@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import analyze
 import compare
@@ -191,6 +191,14 @@ for line in sys.stdin:
     if name == 'oom.vpr': sys.exit(3)
     if name == 'hang.vpr': time.sleep(60)
     if name == 'die.vpr': sys.exit(1)
+    if name == 'partial.vpr':
+        sys.stdout.write('{"success":'); sys.stdout.flush(); time.sleep(60)
+    if name == 'invalid.vpr':
+        print('not json', flush=True); continue
+    if name == 'schema.vpr':
+        print('{"ready":true}', flush=True); continue
+    if name == 'truncated.vpr':
+        sys.stdout.write('{"success":'); sys.stdout.flush(); sys.exit(1)
     if name.startswith('z3oom'):  # the kernel killed a solver; the runner survives
         kills = int(open(events).read().split()[-1]) + 1
         open(events, 'w').write(f'oom {kills}\\noom_kill {kills}\\n')
@@ -235,6 +243,16 @@ for line in sys.stdin:
         self.assertEqual(results[0]['gc_s'], 0.25)
         self.assertEqual(results[0]['gc']['G1 Concurrent GC'], dict(count=1, ms=900))
         self.assertIsNone(results[2]['gc_s'])
+        for name, expected in [('partial', 'timeout'), ('invalid', 'crash'),
+                               ('schema', 'crash'), ('truncated', 'crash')]:
+            with self.subTest(name=name):
+                broken = run.run_warm_once(dict(rows[0], path=f'A/{name}.vpr'), args, lane)
+                self.assertEqual(broken['outcome'], expected)
+                self.assertIsNone(lane.process)
+                recovered = run.run_warm_once(rows[0], args, lane)
+                self.assertEqual(recovered['outcome'], 'verified')
+                self.assertEqual(recovered['runner_start'], broken['runner_start'] + 1)
+                self.assertEqual(recovered['runner_served'], 0)
         args.warm_runs = 2
         lanes = run.queue.Queue()
         lanes.put(run.Lane(args, 1, java))
@@ -242,6 +260,88 @@ for line in sys.stdin:
         record = run.run_warm(rows[0], args, lanes)
         self.assertEqual(record['runner_served'], 1)
         self.assertEqual([w['runner_served'] for w in record['warmup']], [0])
+
+    def test_runner_reader_bounds_partial_lines_by_one_deadline(self):
+        args, _ = self.args()
+        lane = run.Lane(args, 0, args.jar)
+        lane.process = Mock()
+        stdout = lane.process.stdout
+        # Readiness promises bytes, not a complete JSON line. A second fragment
+        # must use the original deadline rather than granting another timeout.
+        with patch.object(run.time, 'monotonic', side_effect=[10, 10, 11, 12]), \
+                patch.object(run.select, 'select', side_effect=[([stdout], [], []),
+                                                                ([stdout], [], []), ([], [], [])]) as select, \
+                patch.object(run.os, 'read', side_effect=[b'{"success":', b'true']) as read:
+            self.assertIsNone(lane.read(3))
+        self.assertEqual(read.call_count, 2)
+        self.assertEqual([call.args[-1] for call in select.call_args_list], [3, 2, 1])
+        stdout.readline.assert_not_called()
+
+    def test_runner_reader_rejects_unframed_or_invalid_responses(self):
+        args, _ = self.args()
+        lane = run.Lane(args, 0, args.jar)
+        lane.process = Mock()
+        for payload in (b'not json\n', b'[]\n', b'{}\n', b'\xff\n',
+                        b'{"ready":true}\n{"ready":true}\n', b'x' * 33):
+            with self.subTest(payload=payload), \
+                    patch.object(run, 'MAX_RESPONSE_BYTES', 32), \
+                    patch.object(run.select, 'select', return_value=([lane.process.stdout], [], [])), \
+                    patch.object(run.os, 'read', return_value=payload):
+                with self.assertRaises(run.RunnerProtocolError):
+                    lane.read(1)
+        with patch.object(run.select, 'select', return_value=([lane.process.stdout], [], [])), \
+                patch.object(run.os, 'read', side_effect=[b'{"ready":', b'true}\n']):
+            self.assertEqual(lane.read(1), {'ready': True})
+        with patch.object(run.select, 'select', return_value=([lane.process.stdout], [], [])), \
+                patch.object(run.os, 'read', side_effect=[b'{"ready":', b'']):
+            with self.assertRaises(run.RunnerProtocolError):
+                lane.read(1)
+
+    def test_runner_send_bounds_blocked_writes_and_rejects_request_injection(self):
+        args, _ = self.args()
+        lane = run.Lane(args, 0, args.jar)
+        lane.process = Mock()
+        stdin = lane.process.stdin
+        with patch.object(run.time, 'monotonic', side_effect=[10, 11]), \
+                patch.object(run.select, 'select', side_effect=[([], [stdin], []), ([], [], [])]), \
+                patch.object(run.os, 'write', return_value=2) as write:
+            self.assertFalse(lane.send('log', ['input.vpr'], 12))
+            self.assertEqual(write.call_count, 1)
+        for value in ('a\tb', 'a\nb', 'a\rb'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                lane.send('log', [value], 12)
+        stdin.write.assert_not_called()
+
+    def test_runner_response_schema_rejects_unusable_measurements(self):
+        response = dict(success=True, fatal=False, wall_s=0.5, jvm_cpu_ticks=2,
+                        children_cpu_ticks=1, heap_after_gc_bytes=7)
+        run.validate_response(response)  # GC is optional for older runners.
+        for key, value in [('success', 1), ('fatal', None), ('wall_s', float('nan')),
+                           ('wall_s', float('inf')), ('wall_s', -1), ('jvm_cpu_ticks', True),
+                           ('children_cpu_ticks', 0.5), ('heap_after_gc_bytes', -1),
+                           ('gc', []), ('gc', {'collector': {'count': 1}})]:
+            with self.subTest(key=key, value=value), self.assertRaises(run.RunnerProtocolError):
+                run.validate_response(dict(response, **{key: value}))
+        with self.assertRaises(run.RunnerProtocolError):
+            run.validate_response({'ready': True})
+
+    def test_night_failed_warmup_discards_runner_before_any_measured_request(self):
+        args, _ = self.args()
+        args.output_directory.mkdir()
+        for failure in ('timeout', 'crash', 'oom'):
+            with self.subTest(failure=failure):
+                lane = night.NightLane(args, 0, args.jar, warmup=[['warm.vpr']])
+                # verify() starts the runner, but start() must not return a lane
+                # whose warm-up response could later be read as measured.vpr.
+                with patch.object(run.Lane, 'start'), \
+                        patch.object(lane, 'request', return_value=(None, failure)) as request, \
+                        patch.object(lane, 'stop') as stop:
+                    with self.assertRaisesRegex(OSError, 'warm-up failed'):
+                        lane.verify(self.root / 'measured.log', ['measured.vpr'])
+                    self.assertEqual(request.call_count, 1)
+                    self.assertEqual(request.call_args.args[1], ['warm.vpr'])
+                    self.assertEqual(stop.call_count, 2)  # before start and after failed warm-up
+        self.assertFalse((args.output_directory / 'warmup' / 'wall.jsonl').exists())
 
     def test_seed_joins_the_single_prover_arguments_string(self):
         args, rows = self.args()
@@ -376,6 +476,11 @@ for line in sys.stdin:
             self.assertEqual(len(run.read_jsonl(out / 'results.jsonl')), len(results))
             with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
                 night.main([*argv, '--timeout', '9'])
+            with patch.object(night.NightLane, 'start', side_effect=OSError('warm-up failed')), \
+                    self.assertRaises(SystemExit) as failed, contextlib.redirect_stderr(io.StringIO()):
+                night.main([*argv, '--output-directory', str(self.root / 'failed-night')])
+            self.assertEqual(failed.exception.code, 1)
+            self.assertEqual(run.read_jsonl(self.root / 'failed-night' / 'results.jsonl'), [])
 
     def test_analyze_medians_instability_outcomes_and_gc(self):
         out = self.root / 'night'
