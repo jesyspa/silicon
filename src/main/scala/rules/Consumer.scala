@@ -393,6 +393,36 @@ object consumer extends ConsumptionRules {
   }
 
 
+  /* Experimental (ledger 2.7b, narrow form): do not re-assume a just-proven universal quantifier
+   * whose trigger matches one of its own body terms under a substitution that maps a quantified
+   * variable to a compound term, e.g. forall k :: {xs[k]} ... ==> xs[k+1] == xs[k]. Each
+   * instance of such a quantifier mints a new trigger match, which can start a matching loop.
+   */
+  private val noReassumeSelfMatch: Boolean =
+    sys.props.get("silicon.exp.noReassumeSelfMatch").contains("true")
+
+  private def isSelfMatching(t: Term): Boolean = t match {
+    case q: Quantification if q.q == Forall =>
+      val bodyTerms = q.body.deepCollect { case b if b.freeVariables.exists(q.vars.contains) => b }
+      q.triggers.exists(trg => trg.p.nonEmpty && trg.p.forall(p => bodyTerms.exists(b => loopingMatch(p, b, q.vars))))
+    case _ => false
+  }
+
+  /* Returns true if `b` is an instance of pattern `p`, with `vars` as pattern variables, under a
+   * substitution that maps some variable to a non-variable term containing a quantified variable.
+   */
+  private def loopingMatch(p: Term, b: Term, vars: Seq[Var]): Boolean = {
+    val binding = mutable.Map.empty[Var, Term]
+    def bind(p: Term, b: Term): Boolean = p match {
+      case x: Var if vars.contains(x) => binding.getOrElseUpdate(x, b) == b
+      case _ => p.getClass == b.getClass && p.subterms.length == b.subterms.length &&
+                p.subterms.zip(b.subterms).forall { case (p1, b1) => bind(p1, b1) }
+    }
+    bind(p, b) &&
+      binding.values.exists(img => !img.isInstanceOf[Var] && img.freeVariables.exists(vars.contains)) &&
+      p.replace(binding.keys.toSeq, binding.values.toSeq) == b
+  }
+
   private def evalAndAssert(s: State, e: ast.Exp, returnSnap: Boolean, pve: PartialVerificationError, v: Verifier)
                            (Q: (State, Option[Term], Verifier) => VerificationResult)
                            : VerificationResult = {
@@ -427,7 +457,8 @@ object consumer extends ConsumptionRules {
         }
         v2.decider.assert(termToAssert) {
           case true =>
-            v2.decider.assume(t, Option.when(debugOn)(e), eNew)
+            if (!(noReassumeSelfMatch && isSelfMatching(t)))
+              v2.decider.assume(t, Option.when(debugOn)(e), eNew)
             QS(s2, v2)
           case false =>
             val failure = createFailure(pve dueTo AssertionFalse(e), v2, s2, termToAssert, eNew)
