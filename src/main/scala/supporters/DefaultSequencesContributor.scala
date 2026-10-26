@@ -21,6 +21,8 @@ class DefaultSequencesContributor(val domainTranslator: DomainsTranslator[Term],
   lazy val defaultSourceResource: String = {
     if (Verifier.config.useOldAxiomatization())
       "/dafny_axioms/sequences_old.vpr"
+    else if (java.lang.Boolean.getBoolean("silicon.exp.seqOneRound"))
+      "/dafny_axioms/sequences_oneround.vpr"
     else
       "/dafny_axioms/sequences.vpr"
   }
