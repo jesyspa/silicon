@@ -53,7 +53,16 @@ class ProverMemoryOutTests extends AnyFunSuite {
     var failOn: List[String] = Nil
     var replace: List[(String, String)] = Nil
     var starts = 0
+    /* The command-line arguments of each prover process */
+    var startArgs: List[Option[String]] = Nil
     private var lastSent: String = _
+
+    def retryArgsFor(args: Option[String], retry: Int): Option[String] = retryArgs(args, retry)
+
+    override protected def createProverInstance(userArgsString: Option[String]): Process = {
+      startArgs = startArgs :+ userArgsString
+      super.createProverInstance(userArgsString)
+    }
 
     override protected def connectToProver(): Unit = {
       starts += 1
@@ -144,7 +153,7 @@ class ProverMemoryOutTests extends AnyFunSuite {
     }
   }
 
-  test("An assertion that reaches the timeout of its first attempt is retried in a fresh prover") {
+  test("An assertion that reaches the timeout of its first attempt is retried in a fresh prover with another seed") {
     withProver { prover =>
       prover.emit("(declare-const x Int)")
       prover.assume("(> x 1)")
@@ -154,6 +163,7 @@ class ProverMemoryOutTests extends AnyFunSuite {
       assert(prover.assert("(> x 0)", None))
       assert(prover.replace.isEmpty)
       assert(prover.starts == 2)
+      assert(prover.startArgs == List(None, Some("smt.random_seed=1 sat.random_seed=1")))
       assert(!prover.ranOutOfMemory())
 
       /* An attempt that fails for another reason is not retried */
@@ -161,5 +171,13 @@ class ProverMemoryOutTests extends AnyFunSuite {
       assert(!prover.assert("(> x 0)", None))
       assert(prover.starts == 2)
     }
+  }
+
+  test("A retry seed differs from the seed of the first attempt") {
+    val prover = new FailingProver
+    assert(prover.retryArgsFor(Some("smt.random_seed=4 sat.random_seed=4 memory_max_size=3000"), 2) ==
+      Some("smt.random_seed=4 sat.random_seed=4 memory_max_size=3000 smt.random_seed=6 sat.random_seed=6"))
+    assert(prover.retryArgsFor(Some("memory_max_size=3000"), 1) ==
+      Some("memory_max_size=3000 smt.random_seed=1 sat.random_seed=1"))
   }
 }
