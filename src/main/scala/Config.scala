@@ -228,7 +228,7 @@ class Config(args: Seq[String]) extends SilFrontendConfig(args, "Silicon") {
   val assertRetryTimeout: ScallopOption[Int] = opt[Int]("assertRetryTimeout",
     descr = (  "Timeout (in ms) for the first attempt at an SMT solver assertion that has no timeout. "
              + "If the attempt reaches the timeout, the prover is restarted with its current state "
-             + "and a different random seed, and the assertion is retried without a timeout. Z3 can "
+             + "and a different random seed, and the assertion is retried with four times the timeout (it fails if it reaches that). Z3 can "
              + "find a proof in a fresh prover that it does not find after the preceding queries "
              + "(default: 1500, 0 disables the retry)."),
     default = Some(1500),
