@@ -6,6 +6,7 @@
 
 package viper.silicon.supporters.functions
 
+import scala.util.control.TailCalls.{TailRec, done, tailcall}
 import viper.silver.ast
 import viper.silicon.common.Mergeable
 import viper.silicon.common.collections.immutable.InsertionOrderedSet
@@ -114,55 +115,76 @@ case class ActualFunctionRecorder(private val _data: Either[FunctionData, (ast.P
                         : Map[(E, Seq[ExpContext]), Term] = {
 
     recordings.map { case (expr, guardsToSnap) =>
-      expr -> toTerm(guardsToSnap, None)
+      expr -> toTerm(guardsToSnap)
     }
   }
 
-  private def toTerm(snaps: InsertionOrderedSet[(Stack[Term], Term)], alternative: Option[Term]): Term = {
+  private def toTerm(snaps: InsertionOrderedSet[(Stack[Term], Term)]): Term = {
     assert(snaps.nonEmpty)
-    if (snaps.size == 1) {
-      alternative match {
-        case Some(alt) => Ite(And(snaps.head._1.toSet), snaps.head._2, alt)
-        case None => snaps.head._2
-      }
-    } else {
-      if (snaps.head._1.isEmpty) {
-        snaps.head._2
-      } else {
-        val firstBranch = snaps.head._1.head
-        val grouped = snaps.groupBy(sn => {
-          if (sn._1.nonEmpty && sn._1.head == firstBranch)
-            1 // starting with firstBranch
-          else if (sn._1.nonEmpty && sn._1.head == Not(firstBranch))
-            2 // starting with Not(firstBranch)
-          else
-            3 // starting with other condition
+    if (snaps.size == 1 || snaps.head._1.isEmpty) return snaps.head._2
+
+    // The input is already deduplicated. Within either branch, removing the common
+    // first guard is injective, so partitions need no further set construction.
+    // Hashing a set entry here would traverse its entire remaining guard stack at
+    // every level. Lists give constant-time tails; vectors retain recording order.
+    type Recordings = Vector[(List[Term], Term)]
+
+    def build(recordings: Recordings, alt: Option[Term]): TailRec[Term] = {
+      assert(recordings.nonEmpty)
+      val (guards, snap) = recordings.head
+      if (recordings.size == 1) {
+        done(alt match {
+          case Some(fallback) => Ite(And(guards.toSet), snap, fallback)
+          case None => snap
         })
-
-        def dropFirst(part: InsertionOrderedSet[(Stack[Term], Term)]): InsertionOrderedSet[(Stack[Term], Term)] = {
-          part.map(sn => (sn._1.tail, sn._2))
+      } else if (guards.isEmpty) {
+        done(snap)
+      } else {
+        val firstBranch = guards.head
+        lazy val oppositeBranch = Not(firstBranch)
+        val positive = Vector.newBuilder[(List[Term], Term)]
+        val negative = Vector.newBuilder[(List[Term], Term)]
+        val remaining = Vector.newBuilder[(List[Term], Term)]
+        recordings.foreach { case entry @ (path, value) =>
+          if (path.nonEmpty && path.head == firstBranch)
+            positive += ((path.tail, value))
+          else if (path.nonEmpty && path.head == oppositeBranch)
+            negative += ((path.tail, value))
+          else
+            remaining += entry
         }
+        val leftRecordings = positive.result()
+        val rightRecordings = negative.result()
+        val otherRecordings = remaining.result()
 
-        val newAlt = if (grouped.contains(3)) Some(toTerm(grouped(3), alternative)) else alternative
-        if (grouped.contains(1) && grouped.contains(2)) {
-          val left = toTerm(dropFirst(grouped(1)), newAlt)
-          val right = toTerm(dropFirst(grouped(2)), newAlt)
-          Ite(firstBranch, left, right)
-        } else {
-          if (grouped.contains(1)) {
-            newAlt match {
-              case Some(actAlt) => Ite(firstBranch, toTerm(dropFirst(grouped(1)), newAlt), actAlt)
-              case None => toTerm(dropFirst(grouped(1)), newAlt)
-            }
+        // Evaluate the fallback first, then the two branches, just as in the
+        // recursive construction. Trampolining also handles long shared paths
+        // whose guards disappear entirely when there is no fallback.
+        val fallback: TailRec[Option[Term]] =
+          if (otherRecordings.nonEmpty)
+            tailcall(build(otherRecordings, alt)).map(t => Some(t))
+          else
+            done(alt)
+
+        fallback.flatMap { newAlt =>
+          // The first recording always belongs to the positive partition.
+          if (rightRecordings.nonEmpty) {
+            for {
+              left <- tailcall(build(leftRecordings, newAlt))
+              right <- tailcall(build(rightRecordings, newAlt))
+            } yield Ite(firstBranch, left, right)
           } else {
             newAlt match {
-              case Some(actAlt) => Ite(Not(firstBranch), toTerm(dropFirst(grouped(2)), newAlt), actAlt)
-              case None => toTerm(dropFirst(grouped(2)), newAlt)
+              case Some(fallback) =>
+                tailcall(build(leftRecordings, newAlt)).map(left => Ite(firstBranch, left, fallback))
+              case None => tailcall(build(leftRecordings, None))
             }
           }
         }
       }
     }
+
+    build(snaps.iterator.map { case (guards, snap) => (guards.toList, snap) }.toVector, None).result
   }
 
   def locToSnap: Map[(ast.LocationAccess, Seq[ExpContext]), Term] = exprToSnap(locToSnaps)
