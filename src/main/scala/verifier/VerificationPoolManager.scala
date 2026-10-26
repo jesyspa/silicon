@@ -74,38 +74,21 @@ class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulCompon
   }
 
   private def teardownWorkerPool(): Unit = {
-    // attempt every teardown step even if an earlier one fails: aborting the teardown half-way
-    // would leak the prover processes of the workers that have not been stopped yet. This matters
-    // in particular for cancelled verifications, where the teardown runs on an interrupted thread
-    // and a blocking step (e.g. waiting for a destroyed prover process) may throw
-    // InterruptedException. The first failure is rethrown after all steps have been attempted.
-    var firstFailure: Option[Throwable] = None
-    def attempt(step: => Unit): Unit = {
-      try {
-        step
-      } catch {
-        case e: Exception => if (firstFailure.isEmpty) firstFailure = Some(e)
-      }
-    }
-
-    if (workerVerifiers != null) {
-      workerVerifiers foreach (worker => attempt(worker.stop()))
-
-      attempt(threadPool.shutdown())
-      attempt(threadPool.awaitTermination(10, TimeUnit.SECONDS))
-    }
-
-    if (workerVerifierPool != null) {
-      attempt(workerVerifierPool.close())
-    }
-
-    firstFailure foreach {
+    try {
+      Cleanup.run(
+        // Cancel queued work before stopping provers: it must not start on a stopped verifier.
+        () => if (threadPool != null) { threadPool.shutdownNow(); () },
+        () => if (workerVerifiers != null) {
+          Cleanup.run(workerVerifiers.map(worker => () => worker.stop()): _*)
+        },
+        // Destroying the provers above also releases workers blocked on solver output.
+        () => if (threadPool != null) { threadPool.awaitTermination(10, TimeUnit.SECONDS); () },
+        () => if (workerVerifierPool != null) workerVerifierPool.close()
+      )
+    } catch {
       case e: InterruptedException =>
-        // the flag was cleared when `e` was thrown; restore it instead of rethrowing so that the
-        // remaining teardown of the enclosing verifier is not aborted by this expected exception:
-        Thread.currentThread().interrupt()
+        // Cleanup restores the flag and prioritises non-interruption failures, if any.
         mainVerifier.logger.warn("interrupted while tearing down the verifier pool", e)
-      case e => throw e
     }
   }
 
