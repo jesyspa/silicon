@@ -69,6 +69,10 @@ def plan(manifests, arms, seeds, order_seed):
     return tasks
 
 
+class WarmupFailure(OSError):
+    """A lane could not establish a warmed runner after retrying."""
+
+
 class NightLane(run.Lane):
     """A warm runner that verifies the warm-up inputs after each start."""
 
@@ -77,7 +81,19 @@ class NightLane(run.Lane):
         self.warmup = warmup
 
     def start(self):
-        super().start()
+        for attempt in range(2):
+            try:
+                super().start()
+                self.warm_up()
+                return
+            except (OSError, run.RunnerProtocolError) as exc:
+                self.stop()
+                with (self.args.output_directory / f'runner-{self.label}.log').open('a') as log:
+                    log.write(f'Warm-up attempt {attempt + 1} failed: {exc}\n')
+                if attempt == 1:
+                    raise WarmupFailure(f'{self.label}: warm-up failed twice: {exc}') from exc
+
+    def warm_up(self):
         directory = self.args.output_directory / 'warmup'
         directory.mkdir(exist_ok=True)
         for options in self.warmup:
@@ -86,10 +102,10 @@ class NightLane(run.Lane):
             if response:  # analyze.py counts warm-up wall against the runner's GC log
                 with (directory / 'wall.jsonl').open('a') as sink:
                     sink.write(json.dumps(dict(runner=self.label, wall_s=response['wall_s'])) + '\n')
-            if failure or not response or response['fatal']:
-                self.stop()
-                raise OSError(f'warm-up failed for {self.label}: {failure or "fatal runner error"}; '
-                              f'see {log}')
+            if failure or not response or response['fatal'] or not response['success']:
+                reason = failure or ('fatal runner error' if response and response['fatal']
+                                     else 'unsuccessful verification')
+                raise OSError(f'warm-up failed for {self.label}: {reason}; see {log}')
 
 
 def execute(args, arms, manifests):
@@ -139,6 +155,7 @@ def execute(args, arms, manifests):
                   for path in args.warmup for _ in range(args.warmup_runs)]
         write = threading.Lock()
         failed = threading.Event()
+        dead_lanes = []
 
         def say(*words):
             with write:
@@ -160,19 +177,34 @@ def execute(args, arms, manifests):
                     if not in_window(args.window, datetime.datetime.now()):
                         return say('lane', index, 'outside window')
                     try:
-                        row, name, seed = tasks.get_nowait()
+                        row, name, seed = tasks.get(timeout=0.25)
                     except queue.Empty:
-                        return
-                    arm = by_name[name]
-                    task = SimpleNamespace(**dict(vars(args), seed=seed, verifier_arg=[
-                        *args.verifier_arg, *arm['verifier_arg']]))
-                    record = dict(**row, **run.run_warm_once(row, task, lanes[name]),
-                                  arm=name, cpus=cpus, returncode=None, errors=[])
-                    with write:
-                        sink.write(json.dumps(record, sort_keys=True) + '\n')
-                        sink.flush()
-                        os.fsync(sink.fileno())
-                    say(record['outcome'], name, seed, f'{record["wall_s"] or 0:.1f}s', row['path'])
+                        # Keep idle lanes available while another lane can still
+                        # return a task after exhausting its warm-up retry.
+                        with tasks.all_tasks_done:
+                            if tasks.unfinished_tasks == 0:
+                                return
+                        continue
+                    try:
+                        arm = by_name[name]
+                        task = SimpleNamespace(**dict(vars(args), seed=seed, verifier_arg=[
+                            *args.verifier_arg, *arm['verifier_arg']]))
+                        try:
+                            record = dict(**row, **run.run_warm_once(row, task, lanes[name]),
+                                          arm=name, cpus=cpus, returncode=None, errors=[])
+                        except WarmupFailure as exc:
+                            tasks.put((row, name, seed))
+                            with write:
+                                dead_lanes.append(index)
+                            say('lane', index, 'dead', str(exc), 'requeued', name, seed, row['path'])
+                            return
+                        with write:
+                            sink.write(json.dumps(record, sort_keys=True) + '\n')
+                            sink.flush()
+                            os.fsync(sink.fileno())
+                        say(record['outcome'], name, seed, f'{record["wall_s"] or 0:.1f}s', row['path'])
+                    finally:
+                        tasks.task_done()
             except BaseException:
                 failed.set()
                 raise
@@ -188,7 +220,9 @@ def execute(args, arms, manifests):
                 futures = [pool.submit(lane, i, cpus) for i, cpus in enumerate(args.lanes)]
                 for future in futures:
                     future.result()
-            say('end', tasks.qsize(), 'tasks left')
+            say('end', tasks.qsize(), 'tasks left', len(dead_lanes), 'dead lanes')
+            if len(dead_lanes) == len(args.lanes) and not tasks.empty():
+                raise OSError(f'all lanes failed warm-up; {tasks.qsize()} tasks remain resumable')
 
 
 def main(argv=None):

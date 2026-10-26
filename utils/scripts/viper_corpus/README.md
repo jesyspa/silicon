@@ -20,10 +20,12 @@ It discards the runner after a timeout, incomplete or malformed response, fatal
 error, or observed OOM kill. Protocol diagnostics go to `runner-<label>.log`.
 Request fields must contain no tabs or newlines; these delimit the wire protocol.
 
-`night.py` applies the same transaction boundary to warm-ups. A warm-up transport
-failure stops the run with a nonzero exit status before the lane measures an
-input. Other lanes finish their current work, and completed results remain
-resumable. Inspect the warm-up and runner logs before resuming.
+`night.py` applies the same transaction boundary to warm-ups. A transport or
+verification failure discards the runner and retries warm-up once in a fresh process. A second
+failure retires that CPU lane and returns its unmeasured task to the queue for
+other lanes. `night.log` records dead lanes; runner logs record failed attempts.
+If all lanes die with tasks remaining, the command exits nonzero. Completed
+results remain resumable. Inspect the warm-up and runner logs before resuming.
 
 The harness guards in `test_viper_corpus.py` use fake runners and mocked pipe IO;
 they do not invoke Silicon or Z3. Run them when testing is permitted:

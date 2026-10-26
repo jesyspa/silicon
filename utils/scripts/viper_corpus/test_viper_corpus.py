@@ -336,12 +336,71 @@ for line in sys.stdin:
                 with patch.object(run.Lane, 'start'), \
                         patch.object(lane, 'request', return_value=(None, failure)) as request, \
                         patch.object(lane, 'stop') as stop:
-                    with self.assertRaisesRegex(OSError, 'warm-up failed'):
+                    with self.assertRaises(night.WarmupFailure):
                         lane.verify(self.root / 'measured.log', ['measured.vpr'])
-                    self.assertEqual(request.call_count, 1)
-                    self.assertEqual(request.call_args.args[1], ['warm.vpr'])
-                    self.assertEqual(stop.call_count, 2)  # before start and after failed warm-up
+                    self.assertEqual(request.call_count, 2)
+                    self.assertTrue(all(call.args[1] == ['warm.vpr'] for call in request.call_args_list))
+                    self.assertEqual(stop.call_count, 3)  # before start and after each failed attempt
         self.assertFalse((args.output_directory / 'warmup' / 'wall.jsonl').exists())
+
+    def test_night_retries_warmup_on_a_fresh_runner(self):
+        args, _ = self.args()
+        args.output_directory.mkdir()
+        response = dict(success=True, fatal=False, wall_s=0.5)
+        failures = [(None, 'timeout'), (dict(response, success=False), None),
+                    (dict(response, success=False, fatal=True), 'crash')]
+        for first in failures:
+            with self.subTest(first=first):
+                lane = night.NightLane(args, 0, args.jar, warmup=[['warm.vpr']])
+                with patch.object(run.Lane, 'start') as start, \
+                        patch.object(lane, 'request', side_effect=[first, (response, None)]) as request, \
+                        patch.object(lane, 'stop') as stop:
+                    lane.start()
+                self.assertEqual(start.call_count, 2)
+                self.assertEqual(stop.call_count, 1)
+                self.assertEqual(request.call_count, 2)
+                wall = args.output_directory / 'warmup' / 'wall.jsonl'
+                self.assertEqual(run.read_jsonl(wall)[-1], dict(runner='0', wall_s=0.5))
+                wall.unlink()
+
+    def test_night_dead_lane_requeues_work_for_an_idle_survivor(self):
+        args, rows = self.args()
+        args.manifest = [args.manifest]
+        args.seeds, args.order_seed, args.lane_memory_max = [0], 0, '1G'
+        args.warmup, args.warmup_runs, args.window, args.lanes = [], 1, None, ['0', '1']
+        jar = args.jar
+        arms = [dict(name='M', jar=jar, jvm_arg=[], verifier_arg=[])]
+        del args.jar
+        rows += [dict(rows[0], path='A/other.vpr')]
+        first_entered, survivor_finished = night.threading.Event(), night.threading.Event()
+        calls = []
+
+        def measure(row, task, lane):
+            if lane.index == 0:
+                first_entered.set()
+                self.assertTrue(survivor_finished.wait(5))
+                raise night.WarmupFailure('warm-up failed twice')
+            self.assertTrue(first_entered.wait(5))
+            calls.append(row['path'])
+            survivor_finished.set()
+            return dict(outcome='verified', wall_s=1)
+
+        with patch.object(run, 'build_runner', return_value=jar), \
+                patch.object(run, 'run_warm_once', side_effect=measure):
+            night.execute(args, arms, [rows])
+        records = run.read_jsonl(args.output_directory / 'results.jsonl')
+        self.assertEqual(sorted(calls), sorted(row['path'] for row in rows))
+        self.assertEqual(len(records), 2)
+        self.assertEqual({row['cpus'] for row in records}, {'1'})
+        self.assertIn('lane 0 dead', (args.output_directory / 'night.log').read_text())
+
+        # If every lane dies, leave all work resumable and exit nonzero.
+        args.output_directory = self.root / 'all-dead'
+        with patch.object(run, 'build_runner', return_value=jar), \
+                patch.object(run, 'run_warm_once', side_effect=night.WarmupFailure('failed twice')):
+            with self.assertRaisesRegex(OSError, 'all lanes failed'):
+                night.execute(args, arms, [rows])
+        self.assertEqual(run.read_jsonl(args.output_directory / 'results.jsonl'), [])
 
     def test_seed_joins_the_single_prover_arguments_string(self):
         args, rows = self.args()
