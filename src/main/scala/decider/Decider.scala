@@ -375,7 +375,10 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
       }
 
       /* Add terms to the prover's assumptions */
-      terms foreach prover.assume
+      if (SeqDistinctInverse.enabled)
+        terms foreach (t => prover.assume(SeqDistinctInverse.rewrite(t, (from, to) => fresh("seqInv", Seq(from), to))))
+      else
+        terms foreach prover.assume
 
       symbExLog.closeScope(sepIdentifier)
       None
