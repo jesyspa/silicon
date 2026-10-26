@@ -290,7 +290,7 @@ def execute(args, arms, manifests):
         config = dict(schema=1, mode='night', corpus_root=str(args.corpus_root), **extra,
                       manifests=[sha256(m) for m in args.manifest], seeds=args.seeds,
                       order_seed=args.order_seed, timeout=args.timeout,
-                      lane_memory_max=args.lane_memory_max, jvm_arg=args.jvm_arg,
+                      lane_memory_max=args.lane_memory_max, slice=args.slice, jvm_arg=args.jvm_arg,
                       verifier_arg=args.verifier_arg, warmup=args.warmup,
                       warmup_runs=args.warmup_runs,
                       artifacts={name: dict(path=str(getattr(args, name)),
@@ -448,6 +448,9 @@ def main(argv=None):
     parser.add_argument('--timeout', type=int, default=300, help='per-input limit in seconds')
     parser.add_argument('--lane-memory-max', default='7G',
                         help='systemd MemoryMax of each runner scope, including its solvers')
+    parser.add_argument('--slice', default='silicon.slice',
+                        help='systemd user slice holding all runner scopes; its MemoryMax is the '
+                             'budget of all Silicon work on the host')
     parser.add_argument('--jvm-arg', action='append', default=[])
     parser.add_argument('--verifier-arg', action='append', default=[])
     parser.add_argument('--warmup', action='append', default=[],

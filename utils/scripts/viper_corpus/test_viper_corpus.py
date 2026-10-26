@@ -368,7 +368,7 @@ for line in sys.stdin:
     def test_night_dead_lane_requeues_work_for_an_idle_survivor(self):
         args, rows = self.args()
         args.manifest = [args.manifest]
-        args.seeds, args.order_seed, args.lane_memory_max = [0], 0, '1G'
+        args.seeds, args.order_seed, args.lane_memory_max, args.slice = [0], 0, '1G', 'test.slice'
         args.warmup, args.warmup_runs, args.window, args.lanes = [], 1, None, ['0', '1']
         jar = args.jar
         arms = [dict(name='M', jar=jar, jvm_arg=[], verifier_arg=[])]
@@ -580,7 +580,7 @@ for line in sys.stdin:
 
     def night_args(self, rows, **extra):
         args, _ = self.args()
-        args.manifest, args.order_seed, args.lane_memory_max = [args.manifest], 0, '1G'
+        args.manifest, args.order_seed, args.lane_memory_max, args.slice = [args.manifest], 0, '1G', 'test.slice'
         args.warmup, args.warmup_runs, args.window, args.lanes = [], 1, None, ['0']
         args.seeds, args.profile, args.targeted = [0, 1], None, []
         args.baseline, args.cap_factor, args.cap_min = 'M', 4.0, 30
@@ -745,9 +745,11 @@ for line in sys.stdin:
 
     def test_warm_defaults_respect_explicit_settings(self):
         self.assertEqual(run.warm_defaults(['-Xmx4g'], []),
-                         (['-Xmx4g', '-Xss512m'], ['--numberOfParallelVerifiers', '1']))
-        self.assertEqual(run.warm_defaults(['-Xss64m'], ['--numberOfParallelVerifiers=4']),
-                         (['-Xss64m'], ['--numberOfParallelVerifiers=4']))
+                         (['-Xmx4g', '-Xss512m', '-XX:G1PeriodicGCInterval=10000'],
+                          ['--numberOfParallelVerifiers', '1']))
+        self.assertEqual(run.warm_defaults(['-Xss64m', '-XX:G1PeriodicGCInterval=0'],
+                                           ['--numberOfParallelVerifiers=4']),
+                         (['-Xss64m', '-XX:G1PeriodicGCInterval=0'], ['--numberOfParallelVerifiers=4']))
 
     def test_tiers_tags_select_t1_and_cost(self):
         text = """// xs ++ ys in a comment is ignored

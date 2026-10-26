@@ -13,7 +13,9 @@ See [harness.md](../../../harness.md) for delegated cgroup setup, commands, meas
 - `noise.py`: per-file noise profile (spread across seeds per JAR, class) from `night.py` runs.
 - `tiers.py`: T0 corpus root and manifest from a case list, T1 manifest from a profile, relevance tags, tag-filtered samples, and projected lane-hours.
 
-Warm runners (`run.py --warm`, `night.py`) default to `-Xss512m` and `--numberOfParallelVerifiers 1` unless the arguments set them.
+Warm runners (`run.py --warm`, `night.py`) default to `-Xss512m`, `-XX:G1PeriodicGCInterval=10000` (an idle runner returns its heap) and `--numberOfParallelVerifiers 1` unless the arguments set them.
+
+Runner scopes go in the user slice `--slice` (default `silicon.slice`). Its `MemoryMax` bounds all Silicon work on the host together; set it once with `systemctl --user set-property silicon.slice MemoryMax=40G MemorySwapMax=0`. Run other Silicon jobs (builds, test suites) in the same slice with `systemd-run --user --scope --slice=silicon.slice`. `night.py` keeps one runner per arm in every lane, so size `-Xmx`, `memory_max_size` and the lane count to fit: about lanes x (heap + Z3 limit) + idle runners x 0.4 GB.
 
 Each script has `--help`. Keep corpus files, manifests, and run output outside the repository.
 

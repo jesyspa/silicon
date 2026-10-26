@@ -89,9 +89,13 @@ SEED_PARAMETERS = ('smt.random_seed', 'sat.random_seed')
 
 
 def warm_defaults(jvm_arg, verifier_arg):
-    """Add 512 MiB thread stacks and one parallel verifier unless the arguments set them."""
+    """Add 512 MiB thread stacks, idle heap return and one parallel verifier unless set."""
     if not any(a.startswith('-Xss') for a in jvm_arg):
         jvm_arg = [*jvm_arg, '-Xss512m']
+    # An idle runner otherwise keeps the heap of its largest input; night.py holds
+    # one idle runner per arm in every lane.
+    if not any(a.startswith('-XX:G1PeriodicGCInterval') for a in jvm_arg):
+        jvm_arg = [*jvm_arg, '-XX:G1PeriodicGCInterval=10000']
     if not any(a.startswith('--numberOfParallelVerifiers') for a in verifier_arg):
         verifier_arg = [*verifier_arg, '--numberOfParallelVerifiers', '1']
     return jvm_arg, verifier_arg
@@ -236,7 +240,9 @@ class Lane:
 
     def scope(self):
         # OOMPolicy=continue keeps the runner alive when the kernel kills its Z3.
-        return ['systemd-run', '--user', '--scope', '--quiet', '-p', 'OOMPolicy=continue',
+        # The shared slice bounds all runners together; MemoryMax bounds one lane.
+        return ['systemd-run', '--user', '--scope', '--quiet', '--slice=' + self.args.slice,
+                '-p', 'OOMPolicy=continue',
                 '-p', 'MemoryMax=' + self.args.lane_memory_max, '-p', 'MemorySwapMax=0', '--']
 
     def start(self):
@@ -440,7 +446,7 @@ def execute(args, rows):
                 config[option] = value
         if args.warm:
             config.update(mode='warm', warm_runs=args.warm_runs,
-                          lane_memory_max=args.lane_memory_max)
+                          lane_memory_max=args.lane_memory_max, slice=args.slice)
         config_path = args.output_directory / 'run.json'
         if config_path.exists():
             if json.loads(config_path.read_text()) != config:
@@ -510,6 +516,9 @@ def main(argv=None):
                         help='verifications per file in --warm mode; the last is measured')
     parser.add_argument('--lane-memory-max', default='7G',
                         help='systemd MemoryMax of each --warm runner scope, including its solvers')
+    parser.add_argument('--slice', default='silicon.slice',
+                        help='systemd user slice holding all runner scopes; its MemoryMax is the '
+                             'budget of all Silicon work on the host')
     args = parser.parse_args(argv)
     if args.warm != (args.cgroup_root is None):
         parser.error('use exactly one of --warm and --cgroup-root')
