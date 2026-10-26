@@ -290,6 +290,37 @@ trait QuantifiedChunkSupport extends SymbolicExecutionRules {
                                    t1: Term, t2: Term, p1: Term, p2: Term, v: Verifier): (FunctionRecorder, Term, Term)
 }
 
+/** A simultaneous variable substitution shared by the terms of one QP operation.
+  * Permission arithmetic can be a DAG: each removal embeds the previous permission
+  * remainder in both the subtraction and the minimum. Traversing it as a tree can
+  * duplicate work exponentially, particularly when permission macros are disabled.
+  *
+  * Cache by identity, not structural equality, to avoid traversing the input DAG
+  * while looking up a cached result. The cache must stay local to this substitution.
+  */
+private[rules] final class QuantifiedPermissionSubstitution(replacements: scala.collection.immutable.Map[Var, Term])
+    extends (Term => Term) {
+  private val rewritten = new java.util.IdentityHashMap[Term, Term]()
+
+  override def apply(term: Term): Term = {
+    if (replacements.isEmpty) return term
+
+    val cached = rewritten.get(term)
+    if (cached != null) return cached
+
+    val result = term match {
+      // Do not rewrite inside replacements: the substitution is simultaneous.
+      case variable: Var => replacements.getOrElse(variable, variable)
+      case _ =>
+        // Let the existing transformer rebuild just this node, retaining its
+        // simplifications and treatment of binders, triggers and opaque terms.
+        term.transform { case child if child ne term => apply(child) }()
+    }
+    rewritten.put(term, result)
+    result
+  }
+}
+
 object quantifiedChunkSupporter extends QuantifiedChunkSupport {
 
   /* Chunk creation */
@@ -374,10 +405,10 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
         qidPrefix,
         v)
 
-    val qvarsToInversesOfCodomain = inverseFunctions.qvarsToInversesOf(codomainQVars)
+    val substitute = new QuantifiedPermissionSubstitution(inverseFunctions.qvarsToInversesOf(codomainQVars))
 
-    val cond = And(And(imagesOfCodomain), condition.replace(qvarsToInversesOfCodomain))
-    val perms = permissions.replace(qvarsToInversesOfCodomain)
+    val cond = And(And(imagesOfCodomain), substitute(condition))
+    val perms = substitute(permissions)
     val hints = extractHints(Some(condition), arguments)
     val ch =
       genericQuantifiedChunk(
@@ -542,14 +573,14 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
 
         // Create a replacement map for rewriting e(r_1, r_2, ...) to e(first(s), second(s), ...),
         // including necessary sort wrapper applications
-        val snapToCodomainTermsSubstitution: Map[Term, Term] =
-        codomainQVars.zip(fromSnapTree(qvar, codomainQVars)).to(Map)
+        val substitute = new QuantifiedPermissionSubstitution(
+          codomainQVars.zip(fromSnapTree(qvar, codomainQVars)).to(Map))
 
         // Rewrite c(r_1, r_2, ...) to c(first(s), second(s), ...)
         val transformedOptSmDomainDefinitionCondition =
-          optSmDomainDefinitionCondition.map(_.replace(snapToCodomainTermsSubstitution))
+          optSmDomainDefinitionCondition.map(substitute)
 
-        (qvar, transformedOptSmDomainDefinitionCondition, (ch: QuantifiedBasicChunk) => IsPositive(ch.perm).replace(snapToCodomainTermsSubstitution))
+        (qvar, transformedOptSmDomainDefinitionCondition, (ch: QuantifiedBasicChunk) => substitute(IsPositive(ch.perm)))
     }
 
     val (domainTerm, hasDomain) = resource match {
@@ -1213,10 +1244,10 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
         val completeReceiverInjectivityCheck = Implies(FunctionPreconditionTransformer.transform(receiverInjectivityCheck, s.program), receiverInjectivityCheck)
         v.decider.assert(completeReceiverInjectivityCheck) {
           case true =>
-            val qvarsToInvOfLoc = inverseFunctions.qvarsToInversesOf(formalQVars)
-            val condOfInvOfLoc = tCond.replace(qvarsToInvOfLoc)
-            val lossOfInvOfLoc = loss.replace(qvarsToInvOfLoc)
-            val argsOfInvOfLoc = tArgs.map(a => a.replace(qvarsToInvOfLoc))
+            val substitute = new QuantifiedPermissionSubstitution(inverseFunctions.qvarsToInversesOf(formalQVars))
+            val condOfInvOfLoc = substitute(tCond)
+            val lossOfInvOfLoc = substitute(loss)
+            val argsOfInvOfLoc = tArgs.map(substitute)
             // ME: We include the following condition to make sure the arguments are contained in the condition (and
             // can trigger other quantifiers) even if neither tCond not loss term mention the arguments.
             val argumentsMatch = And(formalQVars.zip(argsOfInvOfLoc).map(va => va._1 === va._2))
@@ -1860,11 +1891,13 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
 
     val effectiveCondition = And(condition, IsPositive(perms))
 
-    val cond1 = effectiveCondition.replace(qvars, qvars1)
-    val cond2 = effectiveCondition.replace(qvars, qvars2)
+    val substitute1 = new QuantifiedPermissionSubstitution(qvars.zip(qvars1).to(Map))
+    val substitute2 = new QuantifiedPermissionSubstitution(qvars.zip(qvars2).to(Map))
+    val cond1 = substitute1(effectiveCondition)
+    val cond2 = substitute2(effectiveCondition)
 
-    val args1 = arguments.map(_.replace(qvars, qvars1))
-    val args2 = arguments.map(_.replace(qvars, qvars2))
+    val args1 = arguments.map(substitute1)
+    val args2 = arguments.map(substitute2)
 
     // Note: all lists, such as qvars1 and qvars2, are assumed to have pairwise same length
 
@@ -1948,13 +1981,14 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
       imagesOfCodomains(idx) = img(codomainQVars)
     }
 
+    val substitute = new QuantifiedPermissionSubstitution(
+      qvars.zip(ArraySeq.unsafeWrapArray(inversesOfCodomains)).to(Map))
+
     /* f_1(inv_1(rs), ..., inv_n(rs)), ...,  f_m(inv_1(rs), ..., inv_n(rs)) */
-    val fctsOfInversesOfCodomain =
-      invertibles.map(_.replace(qvars, ArraySeq.unsafeWrapArray(inversesOfCodomains)))
+    val fctsOfInversesOfCodomain = invertibles.map(substitute)
 
     /* c(inv_1(rs), ..., inv_n(rs)) */
-    val conditionOfInverses =
-      condition.replace(qvars, ArraySeq.unsafeWrapArray(inversesOfCodomains))
+    val conditionOfInverses = substitute(condition)
 
     /* c(xs) ==>
      *       inv_1(f_1(xs), ..., f_m(xs)) == x_1 && img_1(f_1(xs), ..., f_m(xs)) &&
@@ -2064,8 +2098,10 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
 
     // Positive permission implies the chunk's condition, which is a refinement of its original
     // condition; hence syntactically equal original conditions guarantee the subset checks below.
-    val syntacticMatch = relevantChunks.find(ch =>
-      ch.orgCondition.replace(ch.quantifiedVars, codomainQVars) == chunk.orgCondition)
+    val syntacticMatch = relevantChunks.find { ch =>
+      val substitute = new QuantifiedPermissionSubstitution(ch.quantifiedVars.zip(codomainQVars).to(Map))
+      substitute(ch.orgCondition) == chunk.orgCondition
+    }
     if (syntacticMatch.isDefined)
       return syntacticMatch
 
@@ -2076,8 +2112,9 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
     }
 
     relevantChunks foreach { ch =>
-      val replacedPerm = ch.perm.replace(ch.quantifiedVars, codomainQVars)
-      val replacedOrgCond = ch.orgCondition.replace(ch.quantifiedVars, codomainQVars)
+      val substitute = new QuantifiedPermissionSubstitution(ch.quantifiedVars.zip(codomainQVars).to(Map))
+      val replacedPerm = substitute(ch.perm)
+      val replacedOrgCond = substitute(ch.orgCondition)
       val supersetCheck = Forall(codomainQVars, Implies(IsPositive(replacedPerm), chunk.orgCondition), Nil)
       val subsetCheck = Forall(codomainQVars, Implies(IsPositive(chunk.perm), replacedOrgCond), Nil)
       if (v.decider.check(supersetCheck, 10*Verifier.config.checkTimeout())  ||
@@ -2094,7 +2131,7 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
     invs.flatMap(inv => {
       val qvarsAndInverses: Map[Var, Term] =
         inv.qvarsToInverses.map { case (x, fn) => x -> (App(fn, inv.additionalArguments ++ quantifiedVars): Term) }.to(Map)
-      inv.invertibles.map(_.replace(qvarsAndInverses))
+      inv.invertibles.map(new QuantifiedPermissionSubstitution(qvarsAndInverses))
     })
 
   /* Chunk matching used with the standard QP exhale algorithm: merge only chunks that provably
