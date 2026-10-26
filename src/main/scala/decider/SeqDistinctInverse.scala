@@ -53,6 +53,13 @@ object SeqDistinctInverse {
     case _ => Seq(t)
   }
 
+  /* With the guard i in [a..b), Z3 runs into the matching loop of the predicate's next-chain conjunct
+   * on linked-list-qp-append.vpr (30 s and more); with a <= i && i < b it proves the fold in 0.2 s. */
+  private def arithmeticRange(g: Term): Term = g match {
+    case SeqIn(SeqRanged(a, b), i) => And(AtMost(a, i), Less(i, b))
+    case _ => g
+  }
+
   /** Returns the index variable, the guard (in terms of that variable) and the sequence. */
   private def recognize(q: Quantification): Option[(Var, Term, Term)] = {
     if (q.q != Forall || q.vars.size != 2) return None
@@ -72,7 +79,7 @@ object SeqDistinctInverse {
         val shared = rest.filter(g => !g.hasSubterm(x) && !g.hasSubterm(y))
         if (left.size + right.size + shared.size != rest.size) return None
         if (left.toSet != right.map(_.replace(y, x)).toSet) return None
-        Some((x, And(shared ++ left), s))
+        Some((x, And(shared ++ left.map(arithmeticRange)), s))
       case _ => None
     }
   }
