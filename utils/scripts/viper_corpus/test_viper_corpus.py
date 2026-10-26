@@ -529,6 +529,7 @@ for line in sys.stdin:
                               f'sat.random_seed={r["seed"]}', options)
                 self.assertEqual('--assertTimeout 9' in options, r['arm'] == 'W')
                 self.assertEqual(r['outcome'], 'verified')
+                self.assertGreater(r['jvm_peak_rss_bytes'], 0)
             # One warm-up per started runner, that is per lane and arm used.
             started = {(r['lane'], r['arm']) for r in results}
             self.assertEqual(len(list((out / 'warmup').glob('*.log'))), len(started))

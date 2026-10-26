@@ -133,7 +133,7 @@ With `--baseline ARM`, the baseline runs each file's seeds before the other arms
 
 Each `--lanes` entry is a CPU set. A lane holds one warm runner per arm, started on first use, each in its own `--lane-memory-max` scope and pinned with `taskset`. Restarts and outcomes follow warm mode. `--warmup` inputs are verified, unrecorded, after every runner start. Each runner writes `-Xlog:gc,gc+cpu` (pauses and GC thread CPU) to `gc/<arm>-lane<N>-<pid>.log`.
 
-`results.jsonl` holds one record per file, arm and seed, with the warm-mode fields plus `arm`, `seed`, `cpus` and `timeout_s`. Repeat the command to resume; a changed configuration other than `--lanes` and `--window` is refused. Touch `STOP` in the output directory to stop after the running tasks. Lanes start tasks only inside `--window` (local time, default `19:00-08:00`; `any` disables it) and stop at its end.
+`results.jsonl` holds one record per file, arm and seed, with the warm-mode fields plus `arm`, `seed`, `cpus` and `timeout_s`. Warm records also hold `jvm_peak_rss_bytes`, the runner JVM's peak resident set during the request (VmHWM, reset through `/proc/<pid>/clear_refs` before each request; Z3 is not included). Repeat the command to resume; a changed configuration other than `--lanes` and `--window` is refused. Touch `STOP` in the output directory to stop after the running tasks. Lanes start tasks only inside `--window` (local time, default `19:00-08:00`; `any` disables it) and stop at its end.
 
 `analyze.py` reports a night against a baseline arm:
 

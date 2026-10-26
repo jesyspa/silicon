@@ -201,6 +201,25 @@ def oom_kills(cgroup):
     raise OSError('memory.events lacks oom_kill: ' + str(cgroup))
 
 
+def reset_peak_rss(pid):
+    """Reset the process's resident-set high-water mark (VmHWM; see clear_refs in proc(5))."""
+    try:
+        Path(f'/proc/{pid}/clear_refs').write_text('5')
+    except OSError:
+        pass
+
+
+def peak_rss(pid):
+    """VmHWM in bytes: the peak resident set since the last reset, or None."""
+    try:
+        for line in Path(f'/proc/{pid}/status').read_text().splitlines():
+            if line.startswith('VmHWM:'):
+                return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return None
+
+
 class Lane:
     """One long-lived WarmRunner in its own memory-limited scope.
 
@@ -318,7 +337,10 @@ class Lane:
         context = dict(lane=self.index, runner_start=self.starts, runner_served=self.served,
                        after_restart=self.starts > 1)
         self.served += 1
+        pid = self.process.pid
+        reset_peak_rss(pid)
         response, failure = self.request(log, options, timeout)
+        context['jvm_peak_rss_bytes'] = peak_rss(pid)  # None once a failure stopped the runner
         return response, failure, context
 
     def request(self, log, options, timeout=None):
