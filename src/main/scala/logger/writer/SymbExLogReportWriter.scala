@@ -117,10 +117,7 @@ object SymbExLogReportWriter {
     * @return array of all records.
     */
   def toJSON(members: Seq[MemberSymbExLog], config: LogConfig): JsArray = {
-    val records = members.foldLeft(Vector[JsValue]()) {
-      (prevVal: Vector[JsValue], member: MemberSymbExLog) => prevVal ++ toJSON(member, config)
-    }
-    JsArray(records)
+    JsArray(members.iterator.flatMap(member => recordsIterator(member.log)).map(toJSON(_, config)).toVector)
   }
 
   /** Translates a MemberSymbExLog to a vector of JsValues.
@@ -129,21 +126,36 @@ object SymbExLogReportWriter {
     * @return array of all records.
     */
   def toJSON(symbLog: MemberSymbExLog, config: LogConfig): Vector[JsValue] = {
-    val allRecords = getAllRecords(symbLog.log)
-    allRecords.map(toJSON(_, config)).toVector
+    recordsIterator(symbLog.log).map(toJSON(_, config)).toVector
   }
 
-  def getAllRecords(logs: Seq[SymbolicRecord]): Seq[SymbolicRecord] = {
-    logs.foldLeft(Vector[SymbolicRecord]()) (
-      (prevVal, curVal) => prevVal ++ getAllRecords(curVal))
-  }
+  def getAllRecords(logs: Seq[SymbolicRecord]): Seq[SymbolicRecord] =
+    recordsIterator(logs).toVector
 
-  def getAllRecords(r: SymbolicRecord): Seq[SymbolicRecord] = {
-    // return the record itself plus all records that are referenced by it (which only occurs for branching records)
-    r match {
-      case br: BranchingRecord => br.getBranches.foldLeft(Vector[SymbolicRecord](br)) (
-        (prevVal, curVal) => prevVal ++ getAllRecords(curVal))
-      case _ => Vector(r)
+  def getAllRecords(r: SymbolicRecord): Seq[SymbolicRecord] =
+    recordsIterator(Vector(r)).toVector
+
+  /** Preorder traversal, including unreachable branches. Keeping iterators for the enclosing branches avoids both
+    * recursive calls and materialising a flattened vector at every branch point. */
+  private def recordsIterator(logs: Seq[SymbolicRecord]): Iterator[SymbolicRecord] = new Iterator[SymbolicRecord] {
+    private var pending: List[Iterator[SymbolicRecord]] = logs.iterator :: Nil
+
+    override def hasNext: Boolean = {
+      while (pending.nonEmpty && !pending.head.hasNext) {
+        pending = pending.tail
+      }
+      pending.nonEmpty
+    }
+
+    override def next(): SymbolicRecord = {
+      if (!hasNext) throw new NoSuchElementException("next on empty symbolic execution log")
+      val record = pending.head.next()
+      record match {
+        case br: BranchingRecord =>
+          pending = br.getBranchInfos.iterator.flatMap(_.records.iterator) :: pending
+        case _ =>
+      }
+      record
     }
   }
 

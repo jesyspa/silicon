@@ -57,5 +57,6 @@ class BranchingRecord(possibleBranchesCount: Int, val condition: Option[Term], v
 class BranchInfo {
   var isReachable: Boolean = false
   var startTimeMs: Long = 0
-  var records: Seq[SymbolicRecord] = Seq[SymbolicRecord]()
+  // Branch logs grow by appending; a list-backed Seq would copy the entire prefix for each record.
+  var records: Seq[SymbolicRecord] = Vector.empty
 }
