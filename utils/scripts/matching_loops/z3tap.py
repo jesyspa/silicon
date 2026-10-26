@@ -5,9 +5,9 @@ Environment:
   MLOOP_Z3       real Z3 executable
   MLOOP_TAP_DIR  directory for <pid>.in, <pid>.out and <pid>.args
 
-<pid>.in is the exact input Z3 received. Before every (check-sat ...) it holds a line
+<pid>.in is the exact input Z3 received. Before every top-level command it holds a line
 ';@T <unix time>'; at end of input or on SIGTERM it ends with ';@E <unix time>'. It is
-flushed at every check-sat, so a SIGKILL loses at most input after the last one.
+flushed after every command, so a SIGKILL loses nothing Z3 was sent.
 <pid>.out holds every Z3 output line, from stdout and stderr, prefixed with '<unix time> '.
 Silicon merges the prover's stderr into its stdout, and Z3 reports running out of memory on
 stderr, so the tap forwards stderr to its own stdout as well.
@@ -19,6 +19,24 @@ import subprocess
 import sys
 import threading
 import time
+
+
+def depth_change(text, in_string):
+    """Paren depth change of one input line, and whether it ends inside a |..| or \"..\" token."""
+    change = 0
+    for c in text:
+        if in_string:
+            if c == in_string:
+                in_string = None
+        elif c in '|"':
+            in_string = c
+        elif c == ';':
+            break
+        elif c == '(':
+            change += 1
+        elif c == ')':
+            change -= 1
+    return change, in_string
 
 
 def main():
@@ -69,17 +87,18 @@ def main():
     readers = [threading.Thread(target=pump, args=(stream,), daemon=True) for stream in (z3.stdout, z3.stderr)]
     for reader in readers:
         reader.start()
+    depth, in_string = 0, None
     for line in sys.stdin.buffer:
         text = line.decode(errors='replace')
         with lock:
             if finished:
                 break
-            if text.startswith('(check-sat'):
+            if depth == 0 and in_string is None and text.startswith('('):
                 fin.write(';@T %.6f\n' % time.time())
-                fin.write(text)
-                fin.flush()
-            else:
-                fin.write(text)
+            fin.write(text)
+            fin.flush()
+        change, in_string = depth_change(text, in_string)
+        depth = max(depth + change, 0)
         try:
             z3.stdin.write(line)
             z3.stdin.flush()

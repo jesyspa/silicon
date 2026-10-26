@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 import mloop
@@ -76,6 +77,24 @@ class Tests(unittest.TestCase):
         self.assertAlmostEqual(records[1]['seconds'], 2.0)
         self.assertAlmostEqual(records[2]['seconds'], 7.5)
         self.assertEqual(records[0]['timeout_ms'], 500)
+
+    def test_commands_time_every_command_not_only_check_sat(self):
+        lines = [';@T 100.000000\n', '(set-option :print-success true)\n',
+                 ';@T 100.100000\n', '(push 1)\n',
+                 ';@T 100.200000\n', '(assert\n', '  (> x 0))\n',
+                 ';@T 700.000000\n', '(check-sat)\n', ';@E 710.000000\n']
+        self.write('tap/7.in', ''.join(lines))
+        self.write('tap/7.out', '100.050000 success\n100.600000 success\n100.700000 success\n705.000000 unsat\n')
+        records = mloop.commands(self.root / 'tap')
+        self.assertEqual([r['kind'] for r in records], ['set-option', 'push', 'assert', 'check-sat'])
+        self.assertEqual([r['line'] for r in records], [2, 4, 6, 9])
+        self.assertEqual([round(r['seconds'], 2) for r in records], [0.05, 0.5, 0.4, 5.0])
+        self.assertEqual(mloop.command_summary(records)[0], dict(kind='check-sat', count=1, seconds=5.0))
+
+    def test_commands_without_an_answer_run_until_the_process_ended(self):
+        self.write('tap/7.in', ';@T 100.000000\n(push 1)\n;@E 160.000000\n')
+        self.write('tap/7.out', '')
+        self.assertAlmostEqual(mloop.commands(self.root / 'tap')[0]['seconds'], 60.0)
 
     def test_cut_without_history_keeps_only_the_final_check_sat(self):
         body = (PREAMBLE + '(set-option :timeout 10)\n(check-sat)\n(get-info :reason-unknown)\n'
@@ -186,6 +205,30 @@ class Tests(unittest.TestCase):
         records = mloop.queries(tap)
         self.assertEqual([r['result'] for r in records], ['sat'])
         self.assertIn(';@E ', next(tap.glob('*.in')).read_text())
+
+    @unittest.skipUnless(Z3, 'needs z3')
+    def test_tap_stamps_every_command_once_and_flushes_each(self):
+        tap = self.root / 'tap'
+        tap.mkdir()
+        env = dict(os.environ, MLOOP_Z3=Z3, MLOOP_TAP_DIR=str(tap))
+        script = PREAMBLE + '(assert\n  (g 1))\n(push 1)\n(check-sat)\n(pop 1)\n'
+        proc = subprocess.Popen([sys.executable, str(HERE / 'z3tap.py'), '-smt2', '-in'], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, text=True, env=env)
+        proc.stdin.write(script)
+        proc.stdin.flush()
+        for _ in range(100):
+            # No exit and no end of input yet: everything sent must already be in the tap.
+            text = next(tap.glob('*.in'), None) and next(tap.glob('*.in')).read_text()
+            if text and text.count('(') >= script.count('('):
+                break
+            time.sleep(0.1)
+        self.assertEqual(text.count(";@T "), 10)
+        self.assertNotIn(';@E ', text)
+        proc.stdin.close()
+        proc.wait(timeout=60)
+        kinds = [r['kind'] for r in mloop.commands(tap)]
+        self.assertEqual(kinds[-3:], ['push', 'check-sat', 'pop'])
+        self.assertEqual(len(kinds), 10)
 
     @unittest.skipUnless(Z3, 'needs z3')
     def test_tap_records_out_of_memory_from_stderr_as_the_answer(self):

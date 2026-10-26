@@ -15,13 +15,13 @@ Use `--help` to see all options.
 ## Steps
 
 1. Run Silicon with `--z3Exe z3tap.py`. The tap passes everything through to Z3 and records it:
-   - `tap/<pid>.in`: the exact Z3 input, with a `;@T <time>` line before each check-sat
+   - `tap/<pid>.in`: the exact Z3 input, with a `;@T <time>` line before each top-level command, flushed after every command
    - `tap/<pid>.out`: every Z3 output line, from stdout and stderr, with its time. Z3 reports running out of memory on stderr, and Silicon reads the prover's stderr together with its stdout.
    - `tap/<pid>.args`: the Z3 command line
 
    This is the prover log. It records what Z3 received, including Silicon's restarts and parallel provers.
    Silicon gets `memory_max_size` (`--memory-mb`, default 3000) and `--seed` through `--proverArgs`.
-2. Time each check-sat from its `;@T` line to its answer. A Z3 out-of-memory error counts as the answer. A query without an answer ran until the process ended. `queries.tsv` lists every query.
+2. Time each command from its `;@T` line to the first Z3 output line after it (Silicon sets `print-success`, so every command is answered). `commands.tsv` lists every command, and the report header sums them by kind and lists slow non-check-sat commands such as a `push`. Time each check-sat the same way. A Z3 out-of-memory error counts as the answer. A query without an answer ran until the process ended. `queries.tsv` lists every query.
 3. Take the `--top` slowest queries that took at least `--min-seconds`. For each one, cut a prefix that ends at its check-sat, in `q-<pid>-<index>/`:
    - `prefix.smt2` drops the earlier check-sats, get-info and get-model commands, and Silicon's time and rlimit limits.
    - If that replay takes less than 30% of the original time (and less than 90% of `--replay-timeout`), `prefix-history.smt2` is cut as well. It keeps the earlier check-sats. Some queries depend on Z3's search history, so they are slow only with it.

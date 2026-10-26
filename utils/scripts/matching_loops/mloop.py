@@ -6,6 +6,7 @@ queries, cut a replayable prefix for each, replay it with smt.qi.profile and sta
 sweep smt.qi.eager_threshold, optionally sweep seeds, and write report.md and report.json.
 """
 import argparse
+import bisect
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
@@ -108,6 +109,53 @@ def queries(tap, end=None):
             finish = closed or end or record['start']
             record['seconds'] = max(finish - record['start'], 0)
     return records
+
+
+def command_kind(text):
+    return text[1:].split(None, 1)[0].rstrip(')') if len(text) > 1 else text
+
+
+def commands(tap, end=None):
+    """Per-command records from a tap directory: process, line, start, seconds, kind.
+
+    A command ends at the first Z3 output line at or after its `;@T` stamp: with print-success
+    Z3 answers every command, and Silicon reads the whole answer before it sends the next.
+    A command without an answer ran until the process ended.
+    """
+    records = []
+    for path in sorted(tap.glob('*.in')):
+        times = []
+        out = path.with_suffix('.out')
+        if out.exists():
+            with open(out, errors='replace') as f:
+                times = [float(line.partition(' ')[0]) for line in f]
+        pending = None
+        closed = None
+        found = []
+        with open(path, errors='replace') as f:
+            for number, line in enumerate(f, 1):
+                if line.startswith(';@T '):
+                    pending = float(line[4:])
+                elif line.startswith(';@E '):
+                    closed = float(line[4:])
+                elif pending is not None:
+                    found.append(dict(process=path.stem, line=number, start=pending, kind=command_kind(line)))
+                    pending = None
+        for record in found:
+            i = bisect.bisect_left(times, record['start'])
+            finish = times[i] if i < len(times) else closed or end or record['start']
+            record['seconds'] = max(finish - record['start'], 0)
+            records.append(record)
+    return records
+
+
+def command_summary(records):
+    """Count and total seconds per command kind, slowest total first."""
+    kinds = {}
+    for r in records:
+        n, total = kinds.get(r['kind'], (0, 0.0))
+        kinds[r['kind']] = (n + 1, total + r['seconds'])
+    return [dict(kind=k, count=n, seconds=round(t, 2)) for k, (n, t) in sorted(kinds.items(), key=lambda x: -x[1][1])]
 
 
 def last_output(tap):
@@ -400,6 +448,13 @@ def write_report(out, meta, results):
              f"- Queries: {meta['queries']} in {meta['processes']} Z3 processes; "
              f"analysed the {len(results)} slowest (at least {meta['min_seconds']} s)",
              f"- Time in check-sats, summed over processes: {meta.get('check_sat_seconds')} s"]
+    if meta.get('command_seconds') is not None:
+        lines.append(f"- Time in all SMT commands, summed over processes: {meta['command_seconds']} s; by kind: "
+                     + ', '.join(f"{k['kind']} {k['seconds']} s ({k['count']})" for k in meta['command_kinds'][:6]))
+        for c in meta['slowest_commands']:
+            if c['seconds'] >= 1:
+                lines.append(f"- Slow non-check-sat command: `{c['kind']}` in process {c['process']} "
+                             f"(tap line {c['line']}): {c['seconds']:.2f} s")
     if (meta.get('idle_at_end') or 0) > 10:
         lines.append(f"- No Z3 output in the last {meta['idle_at_end']} s of the run: Silicon spent that time "
                      "outside the prover")
@@ -503,6 +558,11 @@ def main(argv=None):
         for r in records:
             f.write(f"{r['process']}\t{r['index']}\t{r['line']}\t{r['seconds']:.3f}\t{r['result']}\t"
                     f"{r['timeout_ms']}\t{r['rlimit']}\n")
+    timed = commands(tap, run.get('end'))
+    with open(args.out / 'commands.tsv', 'w') as f:
+        f.write('process\tline\tkind\tseconds\n')
+        for r in timed:
+            f.write(f"{r['process']}\t{r['line']}\t{r['kind']}\t{r['seconds']:.3f}\n")
     slow = sorted((r for r in records if r['seconds'] >= args.min_seconds), key=lambda r: -r['seconds'])
     sources = smtq.load_sources(args.vpr)
     results = []
@@ -514,6 +574,12 @@ def main(argv=None):
     last = last_output(tap)
     meta = dict(vpr=str(args.vpr), jar=run.get('jar'), run=run, queries=len(records),
                 check_sat_seconds=round(sum(r['seconds'] for r in records), 2),
+                command_seconds=round(sum(r['seconds'] for r in timed), 2),
+                command_kinds=command_summary(timed),
+                slowest_commands=[dict(process=r['process'], line=r['line'], kind=r['kind'],
+                                       seconds=round(r['seconds'], 2))
+                                  for r in sorted((r for r in timed if r['kind'] != 'check-sat'),
+                                                  key=lambda r: -r['seconds'])[:5]],
                 idle_at_end=round(run['end'] - last, 2) if run.get('end') and last else None,
                 processes=len(list(tap.glob('*.in'))), min_seconds=args.min_seconds, seed=args.seed,
                 eager_threshold=threshold if results else None, replay_timeout=args.replay_timeout)
