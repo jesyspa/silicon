@@ -412,21 +412,7 @@ sealed trait Term extends Node {
   def contains(t: Term): Boolean = this.existsDefined{case `t` =>}
 
   lazy val freeVariables: InsertionOrderedSet[Var] =
-    this.reduceTree((t: Term, freeVarsChildren: Seq[Set[Var]]) => {
-      val freeVars: InsertionOrderedSet[Var] = InsertionOrderedSet(freeVarsChildren.flatten)
-
-      t match {
-        case q: Quantification =>
-          freeVars filterNot q.vars.contains
-        case l: Let =>
-          val lvars = l.bindings.keySet
-          freeVars diff lvars
-        case v: Var =>
-          freeVars + v
-        case _ =>
-          freeVars
-      }
-    })
+    state.utils.computeFreeVariables(this)
 
   lazy val topLevelConjuncts: Seq[Term] = {
     this match {

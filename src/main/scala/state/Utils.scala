@@ -6,7 +6,10 @@
 
 package viper.silicon.state
 
+import java.util.IdentityHashMap
+
 import scala.collection.mutable
+import viper.silicon.common.collections.immutable.InsertionOrderedSet
 import viper.silicon.state.terms._
 import viper.silver.ast
 
@@ -147,6 +150,76 @@ package object utils {
     case MaskAdd(mask, at, addition) => mask :: at :: addition :: Nil
     case MergeHeaps(h1, m1, h2, m2) => h1 :: m1 :: h2 :: m2 :: Nil
     case HeapsOverlap(h1, m1, h2, m2) => h1 :: m1 :: h2 :: m2 :: Nil
+  }
+
+  /** Reduce free variables over the term DAG without unfolding shared subterms.
+    *
+    * Results are intrinsic to each subterm: enclosing binders are applied only when
+    * their own frame finishes. Identity keys avoid recursively hashing terms when
+    * interning is disabled. Reference counts release intermediate sets after their
+    * last use, rather than retaining a free-variable set for every node in a deep
+    * term. All memoization is local to this computation.
+    */
+  private[state] def computeFreeVariables(root: Term): InsertionOrderedSet[Var] = {
+    final class Entry {
+      var remainingUses: Int = 1
+      var variables: InsertionOrderedSet[Var] = null
+    }
+
+    val entries = new IdentityHashMap[Term, Entry]()
+    entries.put(root, new Entry)
+    var pending = root :: Nil
+    while (pending.nonEmpty) {
+      val term = pending.head
+      pending = pending.tail
+      subterms(term).foreach { child =>
+        val entry = entries.get(child)
+        if (entry == null) {
+          entries.put(child, new Entry)
+          pending = child :: pending
+        } else entry.remainingUses += 1
+      }
+    }
+
+    // Each edge consumes its child's result once; the root has one synthetic use.
+    def consume(term: Term, variables: InsertionOrderedSet[Var]): Unit = {
+      val entry = entries.get(term)
+      entry.remainingUses -= 1
+      entry.variables = if (entry.remainingUses == 0) null else variables
+    }
+
+    final class Frame(val term: Term) {
+      val children: Iterator[Term] = subterms(term).iterator
+      val variables = InsertionOrderedSet.newBuilder[Var]
+    }
+
+    var rootVariables = InsertionOrderedSet.empty[Var]
+    var stack = new Frame(root) :: Nil
+    while (stack.nonEmpty) {
+      val frame = stack.head
+      if (frame.children.hasNext) {
+        val child = frame.children.next()
+        val cached = entries.get(child).variables
+        if (cached != null) {
+          frame.variables ++= cached
+          consume(child, cached)
+        } else stack = new Frame(child) :: stack
+      } else {
+        val variables = frame.variables.result()
+        val result = frame.term match {
+          case q: Quantification => variables filterNot q.vars.contains
+          case l: Let => variables diff l.bindings.keySet
+          case v: Var => variables + v
+          case _ => variables
+        }
+        consume(frame.term, result)
+        stack = stack.tail
+        if (stack.nonEmpty) stack.head.variables ++= result
+        else rootVariables = result
+      }
+    }
+
+    rootVariables
   }
 
   /** @see [[viper.silver.ast.utility.Simplifier.simplify]] */
