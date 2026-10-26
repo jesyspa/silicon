@@ -52,21 +52,29 @@ class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulCompon
   private def setupWorkerPool(): Unit = {
     workerVerifiers = Vector.empty
 
-    val poolConfig: GenericObjectPoolConfig[WorkerVerifier] = new GenericObjectPoolConfig()
-    poolConfig.setMaxTotal(numberOfWorkers)
-    poolConfig.setMaxIdle(numberOfWorkers) /* Prevent pool from shutting down idle prover instances */
-    poolConfig.setBlockWhenExhausted(true)
+    try {
+      val poolConfig: GenericObjectPoolConfig[WorkerVerifier] = new GenericObjectPoolConfig()
+      poolConfig.setMaxTotal(numberOfWorkers)
+      poolConfig.setMaxIdle(numberOfWorkers) /* Prevent pool from shutting down idle prover instances */
+      poolConfig.setBlockWhenExhausted(true)
 
-    val factory = PoolUtils.synchronizedPooledFactory(workerVerifierPoolableObjectFactory)
+      val factory = PoolUtils.synchronizedPooledFactory(workerVerifierPoolableObjectFactory)
 
-    workerVerifierPool = new GenericObjectPool[WorkerVerifier](factory, poolConfig)
+      workerVerifierPool = new GenericObjectPool[WorkerVerifier](factory, poolConfig)
 
-    workerVerifierPool.addObjects(poolConfig.getMaxTotal)
+      workerVerifierPool.addObjects(poolConfig.getMaxTotal)
 
-    assert(workerVerifiers.length == poolConfig.getMaxTotal)
-    workerVerifiers foreach (_.start())
+      assert(workerVerifiers.length == poolConfig.getMaxTotal)
+      workerVerifiers foreach (_.start())
 
-    threadPool = new ForkJoinPool(poolConfig.getMaxTotal, new WorkerBorrowingForkJoinThreadFactory(), null, false)
+      threadPool = new ForkJoinPool(poolConfig.getMaxTotal, new WorkerBorrowingForkJoinThreadFactory(), null, false)
+    } catch {
+      case e: Throwable =>
+        // Stop the workers that did start, so that a failed setup does not leak their provers.
+        try teardownWorkerPool()
+        catch { case suppressed: Exception => e.addSuppressed(suppressed) }
+        throw e
+    }
   }
   
   private def resetWorkerPool(): Unit = {
@@ -74,16 +82,26 @@ class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulCompon
   }
 
   private def teardownWorkerPool(): Unit = {
+    // Detach the components first, so that a repeated teardown is a no-op.
+    val pool = threadPool
+    val workers = workerVerifiers
+    val verifierPool = workerVerifierPool
+    threadPool = null
+    workerVerifiers = null
+    workerVerifierPool = null
+
     try {
       Cleanup.run(
         // Cancel queued work before stopping provers: it must not start on a stopped verifier.
-        () => if (threadPool != null) { threadPool.shutdownNow(); () },
-        () => if (workerVerifiers != null) {
-          Cleanup.run(workerVerifiers.map(worker => () => worker.stop()): _*)
+        () => if (pool != null) { pool.shutdownNow(); () },
+        () => if (workers != null) {
+          Cleanup.run(workers.map(worker => () => worker.stop()): _*)
         },
         // Destroying the provers above also releases workers blocked on solver output.
-        () => if (threadPool != null) { threadPool.awaitTermination(10, TimeUnit.SECONDS); () },
-        () => if (workerVerifierPool != null) workerVerifierPool.close()
+        () => if (pool != null && !pool.awaitTermination(10, TimeUnit.SECONDS)) {
+          mainVerifier.logger.warn("verifier pool threads did not terminate within 10 seconds")
+        },
+        () => if (verifierPool != null) verifierPool.close()
       )
     } catch {
       case e: InterruptedException =>
@@ -145,8 +163,10 @@ class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulCompon
     }
 
     override def onTermination(exception: Throwable): Unit = {
-      if (worker != null) {
-        workerVerifierPool.returnObject(worker)
+      // The pool is detached when the verifier pool is torn down before this thread terminates.
+      val pool = workerVerifierPool
+      if (worker != null && pool != null) {
+        pool.returnObject(worker)
       }
     }
 

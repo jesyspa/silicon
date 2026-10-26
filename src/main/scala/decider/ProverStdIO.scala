@@ -15,7 +15,7 @@ import viper.silicon.interfaces.decider.{Prover, Result, Sat, Unknown, Unsat}
 import viper.silicon.reporting.{ExternalToolError, ProverInteractionFailed}
 import viper.silicon.state.IdentifierFactory
 import viper.silicon.state.terms._
-import viper.silicon.verifier.Verifier
+import viper.silicon.verifier.{Cleanup, Verifier}
 import viper.silver.verifier.{DefaultDependency => SilDefaultDependency}
 import viper.silicon.{Config, Map, toMap}
 import viper.silver.reporter.{ConfigurationConfirmation, InternalWarningMessage, QuantifierInstantiationsMessage, Reporter}
@@ -107,21 +107,31 @@ abstract class ProverStdIO(uniqueId: String,
     scopedCommands = Vector(mutable.ArrayBuffer())
     ranOutOfMemorySinceLastCheck = false
     suspendedFromDepth = None
-    logfileWriter = if (!Verifier.config.outputProverLog) null else viper.silver.utility.Common.PrintWriter(Verifier.config.proverLogFile(uniqueId).toFile)
-    proverPath = getProverPath
-    prover = createProverInstance(userArgsString)
-    connectToProver()
-    // Register a shutdown hook to stop prover when the JVM gracefully terminates.
-    // Note that if the JVM abruptly terminates (e.g. because of a SIGKILL)
-    // this hook will not be executed and the prover process will be left running.
-    proverShutdownHook = new Thread {
-      override def run(): Unit = {
-        if (prover.isAlive) {
-          prover.destroyForcibly()
+    try {
+      logfileWriter = if (!Verifier.config.outputProverLog) null else viper.silver.utility.Common.PrintWriter(Verifier.config.proverLogFile(uniqueId).toFile)
+      proverPath = getProverPath
+      prover = createProverInstance(userArgsString)
+      connectToProver()
+      // Register a shutdown hook to stop prover when the JVM gracefully terminates.
+      // Note that if the JVM abruptly terminates (e.g. because of a SIGKILL)
+      // this hook will not be executed and the prover process will be left running.
+      proverShutdownHook = new Thread {
+        override def run(): Unit = {
+          // Read the field: a memory-out restart replaces the process.
+          val process = prover
+          if (process != null && process.isAlive) {
+            process.destroyForcibly()
+          }
         }
       }
+      Runtime.getRuntime.addShutdownHook(proverShutdownHook)
+    } catch {
+      case e: Throwable =>
+        // A partially started prover must not outlive the failed start.
+        try stop()
+        catch { case suppressed: Exception => e.addSuppressed(suppressed) }
+        throw e
     }
-    Runtime.getRuntime.addShutdownHook(proverShutdownHook)
   }
 
   protected def connectToProver(): Unit = {
@@ -172,38 +182,39 @@ abstract class ProverStdIO(uniqueId: String,
    */
   def stop(): Unit = {
     this.synchronized {
-      if (logfileWriter != null) {
-        logfileWriter.flush()
-      }
-      if (output != null) {
-        output.flush()
-      }
-      if (prover != null) {
-        prover.destroyForcibly()
-        prover.waitFor(10, TimeUnit.SECONDS) /* Makes the current thread wait until the process has been shut down */
-      }
-
-      if (logfileWriter != null) {
-        logfileWriter.close()
-      }
-      if (input != null) {
-        input.close()
-      }
-      if (output != null) {
-        output.close()
-      }
-
-      if (proverShutdownHook != null) {
-        // Deregister the shutdown hook, otherwise the prover process that has been stopped cannot be garbage collected.
-        // Explanation: https://blog.creekorful.org/2020/03/classloader-and-memory-leaks/
-        // Bug report: https://github.com/viperproject/silicon/issues/579
-        Runtime.getRuntime.removeShutdownHook(proverShutdownHook)
-        proverShutdownHook = null
-      }
+      // Detach the resources first, so that a repeated stop() is a no-op and a failing step cannot
+      // leave them half-released for a later call.
+      val writer = logfileWriter
+      val process = prover
+      val in = input
+      val out = output
+      val hook = proverShutdownHook
+      logfileWriter = null
+      prover = null
+      input = null
+      output = null
+      proverShutdownHook = null
       allDecls = Seq()
       allEmits = Seq()
       scopedCommands = Vector(mutable.ArrayBuffer())
       preambleAssumptions = Seq()
+
+      Cleanup.run(
+        () => if (writer != null) writer.flush(),
+        () => if (out != null) out.flush(),
+        () => if (process != null) {
+          process.destroyForcibly()
+          process.waitFor(10, TimeUnit.SECONDS) /* Makes the current thread wait until the process has been shut down */
+          ()
+        },
+        () => if (writer != null) writer.close(),
+        () => if (in != null) in.close(),
+        () => if (out != null) out.close(),
+        // Deregister the shutdown hook, otherwise the prover process that has been stopped cannot be garbage collected.
+        // Explanation: https://blog.creekorful.org/2020/03/classloader-and-memory-leaks/
+        // Bug report: https://github.com/viperproject/silicon/issues/579
+        () => if (hook != null) { Runtime.getRuntime.removeShutdownHook(hook); () }
+      )
     }
   }
 
