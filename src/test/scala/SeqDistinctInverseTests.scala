@@ -21,6 +21,7 @@ class SeqDistinctInverseTests extends AnyFunSuite {
   private val s = Var(Identifier("S"), sorts.Seq(sorts.Ref), false)
   private val t = Var(Identifier("T"), sorts.Seq(sorts.Ref), false)
   private val c = Var(Identifier("c"), sorts.Bool, false)
+  private val c2 = Var(Identifier("n"), sorts.Int, false)
   private val inv = Fun(Identifier("inv"), Seq(sorts.Ref), sorts.Int)
   private val range = SeqRanged(IntLiteral(0), SeqLength(s))
 
@@ -40,9 +41,10 @@ class SeqDistinctInverseTests extends AnyFunSuite {
     assert(rewrite(q) == inverse(rangeBounds))
   }
 
-  test("Accepts either inequality orientation and keeps guards on neither variable") {
-    val q = distinct(And(c, SeqIn(range, j), SeqIn(range, i), Not(BuiltinEquals(j, i))), SeqAt(s, i), SeqAt(s, j))
-    assert(rewrite(q) == inverse(And(c, rangeBounds)))
+  test("Accepts arithmetic bounds and either inequality orientation") {
+    val q = distinct(And(AtLeast(j, IntLiteral(0)), Greater(SeqLength(s), i), AtLeast(i, IntLiteral(0)),
+      Greater(SeqLength(s), j), Not(BuiltinEquals(j, i))), SeqAt(s, i), SeqAt(s, j))
+    assert(rewrite(q) == inverse(rangeBounds))
   }
 
   test("Rewrites under conjunctions and implication consequents only") {
@@ -61,6 +63,12 @@ class SeqDistinctInverseTests extends AnyFunSuite {
       distinct(And(Less(i, j), SeqIn(range, i), SeqIn(range, j)), SeqAt(s, i), SeqAt(s, j)),
       // no i != j
       distinct(And(SeqIn(range, i), SeqIn(range, j)), SeqAt(s, i), SeqAt(s, j)),
+      // not the whole sequence
+      distinct(And(SeqIn(SeqRanged(IntLiteral(0), c2), i), SeqIn(SeqRanged(IntLiteral(0), c2), j), neq), SeqAt(s, i), SeqAt(s, j)),
+      distinct(And(SeqIn(SeqRanged(IntLiteral(1), SeqLength(s)), i), SeqIn(SeqRanged(IntLiteral(1), SeqLength(s)), j), neq), SeqAt(s, i), SeqAt(s, j)),
+      distinct(And(AtMost(IntLiteral(0), i), AtMost(IntLiteral(0), j), neq), SeqAt(s, i), SeqAt(s, j)),
+      // additional guards
+      distinct(And(c, SeqIn(range, i), SeqIn(range, j), neq), SeqAt(s, i), SeqAt(s, j)),
       // different sequences
       distinct(And(SeqIn(range, i), SeqIn(range, j), neq), SeqAt(s, i), SeqAt(t, j)),
       // sequence depends on a bound variable

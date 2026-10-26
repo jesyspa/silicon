@@ -10,10 +10,10 @@ import viper.silicon.state.terms._
 
 /** Experimental, enabled with -Dsilicon.exp.seqDistinctInverse=true.
   *
-  * Rewrites an assumed pairwise distinctness quantifier
-  *   forall i, j :: G(i) && G(j) && i != j ==> s[i] != s[j]
-  * into the equivalent inverse-function form
-  *   forall i :: G(i) ==> inv(s[i]) == i
+  * Rewrites an assumed distinctness quantifier over a whole sequence
+  *   forall i, j :: 0 <= i < |s| && 0 <= j < |s| && i != j ==> s[i] != s[j]
+  * (bounds also as i in [0..|s|)) into the equivalent inverse-function form
+  *   forall i :: 0 <= i && i < |s| ==> inv(s[i]) == i
   * where inv is fresh for each assumption. The pairwise form has a multi-pattern {s[i], s[j]} that
   * fires once per pair of index terms; the inverse form fires once per term.
   *
@@ -53,11 +53,14 @@ object SeqDistinctInverse {
     case _ => Seq(t)
   }
 
-  /* With the guard i in [a..b), Z3 runs into the matching loop of the predicate's next-chain conjunct
-   * on linked-list-qp-append.vpr (30 s and more); with a <= i && i < b it proves the fold in 0.2 s. */
-  private def arithmeticRange(g: Term): Term = g match {
-    case SeqIn(SeqRanged(a, b), i) => And(AtMost(a, i), Less(i, b))
-    case _ => g
+  /* Bounds of x stated by a guard conjunct: Some(true -> a) for a <= x, Some(false -> b) for x < b. */
+  private def bounds(g: Term, x: Var): Option[Set[(Boolean, Term)]] = g match {
+    case SeqIn(SeqRanged(a, b), `x`) => Some(Set(true -> a, false -> b))
+    case AtMost(a, `x`) => Some(Set(true -> a))
+    case AtLeast(`x`, a) => Some(Set(true -> a))
+    case Less(`x`, b) => Some(Set(false -> b))
+    case Greater(b, `x`) => Some(Set(false -> b))
+    case _ => None
   }
 
   /** Returns the index variable, the guard (in terms of that variable) and the sequence. */
@@ -76,10 +79,16 @@ object SeqDistinctInverse {
         val rest = gs.filterNot(isNeq)
         val left = rest.filter(g => g.hasSubterm(x) && !g.hasSubterm(y))
         val right = rest.filter(g => g.hasSubterm(y) && !g.hasSubterm(x))
-        val shared = rest.filter(g => !g.hasSubterm(x) && !g.hasSubterm(y))
-        if (left.size + right.size + shared.size != rest.size) return None
+        if (left.size + right.size != rest.size) return None
         if (left.toSet != right.map(_.replace(y, x)).toSet) return None
-        Some((x, And(shared ++ left.map(arithmeticRange)), s))
+        /* Only distinctness of the whole sequence: on testTranspose.vpr, where the bounds are
+         * 0 <= i < M * N, the inverse form is 3.4 times slower or more. The guard is emitted as
+         * arithmetic bounds: with i in [0..|s|), Z3 still runs into the matching loop of the
+         * predicate's next-chain conjunct on linked-list-qp-append.vpr. */
+        val stated = left.map(bounds(_, x))
+        if (stated.contains(None) || stated.flatten.flatten.toSet != Set(true -> IntLiteral(0), false -> SeqLength(s)))
+          return None
+        Some((x, And(AtMost(IntLiteral(0), x), Less(x, SeqLength(s))), s))
       case _ => None
     }
   }
