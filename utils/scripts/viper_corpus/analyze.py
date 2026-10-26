@@ -7,8 +7,9 @@ unstable when max/min across seeds exceeds --unstable in any arm. Timing
 compares a file only when it has at least two seeds and every seed of both arms
 has the same verified or failed outcome and a positive metric. Stable files give
 a geometric mean ratio with a percentile bootstrap CI over files; unstable
-files and outcome changes are listed apart. A file with a capped arm run is a
-regression of at least the cap over the baseline median and is listed apart.
+files and outcome changes are listed apart. A file with a capped arm run is
+listed apart with a lower bound on its ratio: the arm median with capped runs
+counted at their cap, over the baseline median.
 GC pause share comes from the runners' -Xlog:gc logs.
 """
 import argparse
