@@ -12,3 +12,22 @@ See [harness.md](../../../harness.md) for delegated cgroup setup, commands, meas
 - `analyze.py`: seed-median ratios with bootstrap CIs, instability, outcome tables, and GC share for `night.py` runs.
 
 Each script has `--help`. Keep corpus files, manifests, and run output outside the repository.
+
+## Warm-runner failures
+
+`run.py::Lane.request` bounds request writes and response reads by one deadline.
+It discards the runner after a timeout, incomplete or malformed response, fatal
+error, or observed OOM kill. Protocol diagnostics go to `runner-<label>.log`.
+Request fields must contain no tabs or newlines; these delimit the wire protocol.
+
+`night.py` applies the same transaction boundary to warm-ups. A warm-up transport
+failure stops the run with a nonzero exit status before the lane measures an
+input. Other lanes finish their current work, and completed results remain
+resumable. Inspect the warm-up and runner logs before resuming.
+
+The harness guards in `test_viper_corpus.py` use fake runners and mocked pipe IO;
+they do not invoke Silicon or Z3. Run them when testing is permitted:
+
+```sh
+python3 -m unittest discover -s utils/scripts/viper_corpus -p 'test_viper_corpus.py'
+```
