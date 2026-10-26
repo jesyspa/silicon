@@ -8,8 +8,12 @@ See [harness.md](../../../harness.md) for delegated cgroup setup, commands, meas
 - `run.py`: parallel, resumable runs through `../solver_cpu_benchmark.py`.
 - `WarmRunner.java`: long-lived Silicon driver for `run.py --warm`.
 - `compare.py`: per-group timing ratios, outcome transitions, and ranked changes.
-- `night.py`: several arms under several Z3 seeds, interleaved per file, in warm lanes.
-- `analyze.py`: seed-median ratios with bootstrap CIs, instability, outcome tables, and GC share for `night.py` runs.
+- `night.py`: several arms under several Z3 seeds, interleaved per file, in warm lanes. With `--profile`, seeds per file follow its noise class; with `--baseline`, other arms get a timeout of 4x the baseline's slowest run and cut runs are recorded as `capped`.
+- `analyze.py`: seed-median ratios with bootstrap CIs, instability, capped regressions, outcome tables, and GC share for `night.py` runs.
+- `noise.py`: per-file noise profile (spread across seeds per JAR, class) from `night.py` runs.
+- `tiers.py`: T0 corpus root and manifest from a case list, T1 manifest from a profile, relevance tags, tag-filtered samples, and projected lane-hours.
+
+Warm runners (`run.py --warm`, `night.py`) default to `-Xss512m` and `--numberOfParallelVerifiers 1` unless the arguments set them.
 
 Each script has `--help`. Keep corpus files, manifests, and run output outside the repository.
 

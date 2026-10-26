@@ -65,7 +65,7 @@ def in_window(window, now):
 
 # Seeds per noise class; see method.md for the derivation. Files whose profiled
 # median wall is below cheap_s seconds get at least `cheap` seeds.
-POLICY = {'quiet': 2, 'mid': 3, 'noisy': 6, 'flips': 6, 'always-timeout': 1, 'unknown': 3,
+POLICY = {'quiet': 2, 'mid': 3, 'noisy': 8, 'flips': 3, 'always-timeout': 1, 'unknown': 3,
           'targeted': 3, 'cheap': 3, 'cheap_s': 10}
 TIMED = ('verified', 'failed')
 T975 = [12.71, 4.30, 3.18, 2.78, 2.57, 2.45, 2.36, 2.31, 2.26, 2.23, 2.20, 2.18, 2.16, 2.14,
@@ -86,10 +86,15 @@ def parse_policy(text, min_seeds=1):
 
 
 def seed_count(entry, policy, targeted=False):
-    """Seeds for a file from its profile entry ({} when unprofiled)."""
+    """Seeds for a file from its profile entry ({} when unprofiled).
+
+    The seed floor skips always-timeout files the change does not target.
+    """
     kind = entry.get('class', 'unknown')
-    count = policy['targeted'] if kind == 'always-timeout' and targeted else policy[kind]
-    if kind != 'always-timeout' and (entry.get('median_wall_s') or math.inf) < policy['cheap_s']:
+    if kind == 'always-timeout':
+        return max(policy['targeted'], policy['min']) if targeted else policy[kind]
+    count = policy[kind]
+    if (entry.get('median_wall_s') or math.inf) < policy['cheap_s']:
         count = max(count, policy['cheap'])
     return max(count, policy['min'])
 

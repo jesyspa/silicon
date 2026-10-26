@@ -3,20 +3,26 @@
 
 Per file and JAR (by SHA-256) the profile records the wall-time spread across
 seeds and a class: quiet (max/min < --quiet), mid (< --mid), noisy, flips (the
-outcome changes with the seed) or always-timeout. A file's class is the worst
-class of its JARs with at least two seeds, ranked quiet < mid < noisy < flips;
-it is always-timeout only if every such JAR always times out. Capped runs are
+outcome changes with the seed) or always-timeout.
+
+A file is flips if any JAR flips, and always-timeout if every JAR with two or
+more seeds always times out. Otherwise its class comes from the SD of log wall
+time within each JAR, pooled over its finishing JARs, expressed as the expected
+max/min of three seeds, exp(1.693 SD), and compared with the same thresholds.
+Pooling keeps the class independent of how many JARs ran the file; the worst
+JAR's class would drift toward noisy as JARs accumulate. Capped runs are
 censored at their cap and are left out. An unfinished last record is skipped,
 so a running night can be read.
 """
 import argparse
 from collections import defaultdict
 import json
+import math
 from pathlib import Path
 import statistics
 
 TIMED = ('verified', 'failed')
-RANK = ('quiet', 'mid', 'noisy', 'flips')
+D2 = 1.693  # expected range of three standard normal samples
 
 
 def read_complete(path):
@@ -43,12 +49,28 @@ def classify(samples, quiet, mid):
     return 'quiet' if spread < quiet else 'mid' if spread < mid else 'noisy'
 
 
-def file_class(classes):
+def pooled_spread(by_jar):
+    """exp(D2 * pooled within-JAR SD of log wall) over uniformly timed JARs, or None."""
+    squares, freedom = 0.0, 0
+    for samples in by_jar:
+        logs = [math.log(w) for o, w in samples if o in TIMED and w and w > 0]
+        if len(logs) < 2 or len(logs) != len(samples) or len({o for o, _ in samples}) > 1:
+            continue
+        mean = sum(logs) / len(logs)
+        squares += sum((x - mean) ** 2 for x in logs)
+        freedom += len(logs) - 1
+    return math.exp(D2 * math.sqrt(squares / freedom)) if freedom else None
+
+
+def file_class(classes, spread, quiet, mid):
     classes = [c for c in classes if c]
-    if not classes:
+    if 'flips' in classes:
+        return 'flips'
+    if classes and all(c == 'always-timeout' for c in classes):
+        return 'always-timeout'
+    if spread is None:
         return 'unknown'
-    finishing = [c for c in classes if c != 'always-timeout']
-    return max(finishing, key=RANK.index) if finishing else 'always-timeout'
+    return 'quiet' if spread < quiet else 'mid' if spread < mid else 'noisy'
 
 
 def profile(directories, quiet=1.25, mid=2.0):
@@ -79,7 +101,9 @@ def profile(directories, quiet=1.25, mid=2.0):
                              median_s=statistics.median(walls) if walls else None,
                              spread=max(walls) / min(walls) if len(walls) > 1 else None)
         medians = [j['median_s'] for j in jars.values() if j['median_s']]
-        files[path] = {'class': file_class(j['class'] for j in jars.values()),
+        spread = pooled_spread(by_jar.values())
+        files[path] = {'class': file_class([j['class'] for j in jars.values()], spread, quiet, mid),
+                       'pooled_spread': spread,
                        'median_wall_s': statistics.median(medians) if medians else None,
                        'jars': jars}
     return dict(schema=1, thresholds=dict(quiet=quiet, mid=mid), sources=sources, files=files)

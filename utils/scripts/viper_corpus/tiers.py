@@ -20,6 +20,8 @@ import night
 import run
 
 # Heuristic patterns over source text with comments removed; they over-approximate.
+# A quantifier: variables, ::, trigger sets, then a body of at most 400 characters.
+QUANTIFIER = r'\bforall\b[^;{}]{0,400}?::\s*(?:\{[^{}]*\}\s*)*[^;{}]{0,400}?'
 TAGS = {
     'seq': r'\bSeq\[|\bSeq\(',
     'seq_append': r'\+\+',
@@ -28,8 +30,8 @@ TAGS = {
     'set': r'\bSet\[|\bSet\(',
     'multiset': r'\bMultiset\[|\bMultiset\(',
     'map': r'\bMap\[',
-    'qp': r'\bforall\b[^;{}]{0,400}?::[^;{}]{0,400}?\bacc\(',
-    'qp_predicate': r'\bforall\b[^;{}]{0,400}?::[^;{}]{0,400}?\bacc\(\s*\w+\(',
+    'qp': QUANTIFIER + r'\bacc\(',
+    'qp_predicate': QUANTIFIER + r'\bacc\(\s*\w+\(',
     'wand': r'--\*',
     'prusti_lifetime': r'\b(?:LifetimeToken|DeadLifetimeToken|lifetime_token_perm_amount)\b',
     'adt': r'\badt\b\s+\w+',
@@ -45,8 +47,24 @@ def scan(text):
     return sorted(found if 'seq' in found else found - {'seq_index'})
 
 
+def imports(path):
+    """Files path imports, directly or not, as resolved paths."""
+    seen, pending = set(), [path]
+    while pending:
+        source = pending.pop()
+        for name in IMPORT.findall(COMMENT.sub(' ', source.read_text(errors='replace'))):
+            target = (source.parent / name).resolve()
+            if target not in seen and target.is_file():
+                seen.add(target)
+                pending.append(target)
+    return sorted(seen)
+
+
 def tags(root, rows):
-    return {r['path']: scan((root / r['path']).read_text(errors='replace')) for r in rows}
+    """Tags of each file together with the files it imports."""
+    return {r['path']: scan('\n'.join(p.read_text(errors='replace') for p in
+                                      [root / r['path'], *imports(root / r['path'])]))
+            for r in rows}
 
 
 def sample(rows, count, seed):
@@ -95,14 +113,14 @@ def build_t0(spec, corpus_root, root):
         relative = PurePosixPath(dest)
         if relative.is_absolute() or '..' in relative.parts or len(relative.parts) < 2:
             raise ValueError('destination must be GROUP/...: ' + dest)
-        source = Path(source) if source else corpus_root / dest
-        pending = [(source, root / dest)]
-        while pending:
-            src, dst = pending.pop()
+        source = Path(source).resolve() if source else corpus_root / dest
+        for src in [source, *imports(source)]:
+            dst = root / dest if src == source else (
+                root / relative.parent / src.relative_to(source.parent, walk_up=True)).resolve()
+            if not dst.is_relative_to(root):
+                raise ValueError(f'{dest} imports a file outside the T0 root: {src}')
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, dst)
-            for name in IMPORT.findall(COMMENT.sub(' ', src.read_text(errors='replace'))):
-                pending.append(((src.parent / name).resolve(), (dst.parent / name).resolve()))
         row = dict(path=dest, group=relative.parts[0], sha256=curate.sha256(root / dest),
                    size=(root / dest).stat().st_size)
         if arguments:

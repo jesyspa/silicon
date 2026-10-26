@@ -612,19 +612,26 @@ for line in sys.stdin:
                               slow='always-timeout', cut='quiet'))
         self.assertEqual(files['quiet']['median_wall_s'], (10.5 + 30) / 2)
         self.assertEqual(set(files['cut']['jars']), {'m'})
-        self.assertEqual(noise.file_class(['always-timeout', 'quiet', 'mid']), 'mid')
-        self.assertEqual(noise.file_class([None]), 'unknown')
+        # Pooled: a quiet and a noisy JAR of two seeds each.
+        self.assertAlmostEqual(files['quiet']['pooled_spread'],
+                               noise.math.exp(noise.D2 * noise.math.log(11 / 10) / 2))
+        self.assertEqual(noise.file_class(['always-timeout', 'mid'], 1.5, 1.25, 2), 'mid')
+        self.assertEqual(noise.file_class(['always-timeout', 'flips'], 1.0, 1.25, 2), 'flips')
+        self.assertEqual(noise.file_class([None], None, 1.25, 2), 'unknown')
 
     def test_night_seed_policy_and_baseline_first_plan(self):
         policy = night.parse_policy('flips=10', min_seeds=1)
         count = lambda entry, targeted=False: night.seed_count(entry, policy, targeted)
         self.assertEqual([count(dict(**{'class': c}, median_wall_s=60)) for c in
                           ('quiet', 'mid', 'noisy', 'flips', 'always-timeout', 'unknown')],
-                         [2, 3, 6, 10, 1, 3])
+                         [2, 3, 8, 10, 1, 3])
         self.assertEqual(count({'class': 'always-timeout'}, targeted=True), 3)
         self.assertEqual(count({'class': 'quiet', 'median_wall_s': 1}), 3)
         self.assertEqual(count({}), 3)
         self.assertEqual(night.seed_count({}, night.parse_policy('', 10)), 10)
+        self.assertEqual(night.seed_count({'class': 'always-timeout'}, night.parse_policy('', 10)), 1)
+        self.assertEqual(night.seed_count({'class': 'always-timeout'}, night.parse_policy('', 10),
+                                          targeted=True), 10)
         with self.assertRaises(ValueError):
             night.parse_policy('loud=3')
         rows = [dict(path='A/a.vpr'), dict(path='A/b.vpr')]
@@ -721,7 +728,7 @@ for line in sys.stdin:
             night.execute(args, arms, [rows])
             profile.write_text(json.dumps(dict(files={})))
             night.execute(args, arms, [rows])  # resumes from the snapshot: nothing to run
-        self.assertEqual(sorted(seen), [(a, s) for a in 'MW' for s in range(6)])
+        self.assertEqual(sorted(seen), [(a, s) for a in 'MW' for s in range(8)])
         self.assertIn('noisy', (args.output_directory / 'profile.json').read_text())
 
     def test_warm_defaults_respect_explicit_settings(self):
@@ -737,6 +744,7 @@ for line in sys.stdin:
         self.assertEqual(tiers.scan(text), ['qp', 'seq', 'seq_index', 'seq_slice', 'wand'])
         self.assertIn('prusti_lifetime', tiers.scan('inhale acc(DeadLifetimeToken(l))'))
         self.assertIn('qp_predicate', tiers.scan('inhale forall x: Ref :: x in s ==> acc(P(x))'))
+        self.assertIn('qp', tiers.scan('inhale forall x: Ref :: {x.f} {g(x)} x in s ==> acc(x.f)'))
         self.assertNotIn('seq_index', tiers.scan('var x: Map[Int, Int]'))
         rows = [dict(path=f'A/{i}.vpr') for i in range(10)]
         tags = {'A/0.vpr': ['wand'], 'A/1.vpr': ['seq']}
@@ -752,8 +760,8 @@ for line in sys.stdin:
         self.assertEqual(len(t1), 5)
         self.assertTrue({'A/0.vpr', 'A/1.vpr', 'A/2.vpr'} <= set(t1))
         hours, runs, missing = tiers.cost(rows[:4], profile, night.parse_policy(''), 30, 300)
-        self.assertEqual((runs, missing), (3 + 6 + 1 + 3, 0))
-        self.assertAlmostEqual(hours * 3600, 3 * 8 + 6 * 1 + 300 + 3 * 1)
+        self.assertEqual((runs, missing), (3 + 3 + 1 + 3, 0))
+        self.assertAlmostEqual(hours * 3600, 3 * 8 + 3 * 1 + 300 + 3 * 1)
 
     def test_tiers_t0_copies_imports_and_records_arguments(self):
         self.source('F/_preambles/p.vpr', 'domain D {}')

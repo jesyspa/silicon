@@ -112,16 +112,28 @@ python3 utils/scripts/viper_corpus/night.py \
   --corpus-root "$CORPUS" --manifest "$BENCH/quick.jsonl" --output-directory "$BENCH/night" \
   --java /absolute/path/to/java --z3 /absolute/path/to/z3 \
   --arm "M=/jars/main/silicon.jar" --arm "W=/jars/candidate/silicon.jar --assertTimeout 10000" \
-  --lanes '2,10;3,11;6,14' --jvm-arg=-Xmx4g --jvm-arg=-Xss128m \
+  --lanes '2,10;3,11;6,14;7,15;5,13' --jvm-arg=-Xmx4g \
   --verifier-arg=--proverArgs --verifier-arg=memory_max_size=3000 \
   --warmup DaG/gobra/dafny_book/chap08.vpr
 ```
 
 Files run in a shuffled order. Every arm and seed of a file runs, in shuffled order, before the next file starts, so a run stopped early leaves every arm and seed with the same files and spreads load drift over them. Repeated `--manifest` options run in order, so a priority subset can go first. `--order-seed` fixes both shuffles.
 
+Warm runners get `-Xss512m` and `--numberOfParallelVerifiers 1` unless the common or arm arguments set them.
+
+### Noise profile, adaptive seeds and capped timeouts
+
+`noise.py DIR... --output profile.json` reads night output directories, including one still running, and records per file and JAR the wall-time spread across seeds and a class: `quiet` (max/min < 1.25), `mid` (< 2), `noisy`, `flips` (the outcome changes with the seed in some JAR) or `always-timeout`. The file class pools the within-JAR SD of log wall time over its JARs and compares exp(1.693 SD), the expected max/min of three seeds, with the same thresholds, so it does not drift as more JARs run the file. Capped runs are left out.
+
+With `--profile`, `night.py` runs each file with seeds 0..k-1, the same for every arm. k comes from the class: by default quiet 2, mid 3, noisy 8, flips 3, always-timeout 1, unknown 3, and at least 3 for files whose profiled median wall is below 10 s; `--seed-policy CLASS=N,...` changes these and `--min-seeds` sets a floor. Always-timeout files keep one seed unless a `--targeted` manifest lists them. The profile is copied into the output directory on first start, and resumes use that copy.
+
+With `--baseline ARM`, the baseline runs each file's seeds before the other arms start on that file. If every baseline seed finishes, the other arms get a timeout of `--cap-factor` (default 4) times the slowest baseline run, between `--cap-min` (default 30 s) and `--timeout`. A run cut by such a timeout is recorded with outcome `capped`; every record holds its `timeout_s`. `--extend-width W --max-seeds N` adds one seed to a finished file, for all arms, while any arm's 95% t-interval half-width of per-seed log(arm / baseline) exceeds W.
+
+`tiers.py` builds the manifests: `t0` copies a case list, with the files it imports, into a separate corpus root; `t1` takes files with a profiled median of at least `--slow` seconds or a noisy, flips or always-timeout class, plus a fixed random sample of the rest; `tags` scans each file and its imports for features that changes target (sequence append, slice and index, quantified permissions, magic wands, Prusti lifetime tokens and others); `select` keeps the files with any given tag plus a fixed random sample of N others; `cost` projects lane-hours per arm from a profile.
+
 Each `--lanes` entry is a CPU set. A lane holds one warm runner per arm, started on first use, each in its own `--lane-memory-max` scope and pinned with `taskset`. Restarts and outcomes follow warm mode. `--warmup` inputs are verified, unrecorded, after every runner start. Each runner writes `-Xlog:gc` to `gc/<arm>-lane<N>-<pid>.log`.
 
-`results.jsonl` holds one record per file, arm and seed, with the warm-mode fields plus `arm`, `seed` and `cpus`. Repeat the command to resume; a changed configuration other than `--lanes` and `--window` is refused. Touch `STOP` in the output directory to stop after the running tasks. Lanes start tasks only inside `--window` (local time, default `19:00-08:00`; `any` disables it) and stop at its end.
+`results.jsonl` holds one record per file, arm and seed, with the warm-mode fields plus `arm`, `seed`, `cpus` and `timeout_s`. Repeat the command to resume; a changed configuration other than `--lanes` and `--window` is refused. Touch `STOP` in the output directory to stop after the running tasks. Lanes start tasks only inside `--window` (local time, default `19:00-08:00`; `any` disables it) and stop at its end.
 
 `analyze.py` reports a night against a baseline arm:
 
@@ -130,7 +142,7 @@ python3 utils/scripts/viper_corpus/analyze.py "$BENCH/night" --baseline M \
   --subset seq=targeted.txt --json "$BENCH/night/analysis.json" > "$BENCH/night/analysis.md"
 ```
 
-Per file and arm it takes the median across seeds. A file is unstable when max/min across seeds exceeds `--unstable` (default 2) in any arm. A file enters a comparison only when every seed of both arms has the same `verified` or `failed` outcome and a positive metric. For stable files it reports the geometric mean ratio (arm / baseline) with a 95% percentile bootstrap CI over files, and the number of files. Unstable files, outcome tables per arm and seed, outcome changes across seeds within an arm, and outcome changes across arms at one seed are listed separately. GC pause share is the summed non-`System.gc()` pause time in the `-Xlog:gc` logs over the summed request wall time, warm-ups included (from `warmup/wall.jsonl`), per arm; the per-request MXBean share is shown beside it. `--subset NAME=FILE` repeats the ratios for the corpus paths listed in FILE.
+Per file and arm it takes the median across seeds; files may have different seeds, but both arms need the same seeds of a file. A file is unstable when max/min across seeds exceeds `--unstable` (default 2) in any arm. A file enters a comparison only when it has at least two seeds and every seed of both arms has the same `verified` or `failed` outcome and a positive metric. A file with a capped arm run is listed as a regression of at least its cap over the baseline median. For stable files it reports the geometric mean ratio (arm / baseline) with a 95% percentile bootstrap CI over files, and the number of files. Unstable files, outcome tables per arm and seed, outcome changes across seeds within an arm, and outcome changes across arms at one seed are listed separately. GC pause share is the summed non-`System.gc()` pause time in the `-Xlog:gc` logs over the summed request wall time, warm-ups included (from `warmup/wall.jsonl`), per arm; the per-request MXBean share is shown beside it. `--subset NAME=FILE` repeats the ratios for the corpus paths listed in FILE.
 
 ## Compare
 
