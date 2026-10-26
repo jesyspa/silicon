@@ -1,0 +1,13 @@
+// A conjunction branch condition repeats p, which is already assumed outside
+// the conditional expression's local scopes. Popping those scopes must preserve
+// p in the path-condition membership cache.
+//
+// This is a diagnostic reproducer, not an expected verification failure: Z3
+// still knows p even when the cache incorrectly forgets it. Compare the final
+// assertion's prover query (or inspect pcs.contains(p) before that assertion).
+method pathConditionRollback(p: Bool, q: Bool)
+  requires p
+{
+  var selected: Int := (p && q) ? 1 : 0
+  assert p
+}
