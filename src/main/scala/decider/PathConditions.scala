@@ -18,11 +18,6 @@ import viper.silver.ast.TrueLit
  * Interfaces
  */
 
-/* TODO: 'contains' functionality currently not needed. If removed, 'allAssumptions' could
- *       probably removed as well.
- *       Benchmark runtime difference!
- */
-
 trait RecordedPathConditions {
   def branchConditions: Stack[Term]
   def branchConditionExps: Stack[(ast.Exp, Option[ast.Exp])]
@@ -477,6 +472,12 @@ private[decider] class LayeredPathConditionStack
   /* Set of assumptions across all layers. Maintained separately to improve performance. */
   private var allAssumptions = InsertionOrderedSet.empty[Term]
 
+  /* One immutable aggregate per layer, capturing the assumptions just before that layer was
+   * pushed. Rollback must restore this set, not subtract the popped layer's assumptions: the
+   * same assumption can also occur in a surviving layer (including as part of a conjunction).
+   * The snapshots share their persistent set structure and can also be shared by duplicate(). */
+  private var assumptionSnapshots: Stack[InsertionOrderedSet[Term]] = Stack.empty
+
   pushScope() /* Create an initial layer on the stack */
 
   def setCurrentBranchCondition(condition: Term, conditionExp: (ast.Exp, Option[ast.Exp])): Unit = {
@@ -547,6 +548,7 @@ private[decider] class LayeredPathConditionStack
 
     val debugExpStackTmp = if (layers.nonEmpty && Verifier.config.enableDebugging()) layers.head.debugExpStack else Stack.empty
 
+    assumptionSnapshots = allAssumptions +: assumptionSnapshots
     layers = new PathConditionStackLayer() +: layers
 
     layers.head.debugExpStack = debugExpStackTmp
@@ -569,18 +571,10 @@ private[decider] class LayeredPathConditionStack
 //    markToLength = markToLength filter (_._2 < targetLength)
 //      /* TODO: Performance? Do lazily, e.g. when isEmpty is called? */
 
-    var i = 0
-    layers =
-      layers.dropWhile(layer => {
-        i += 1
-        allAssumptions --= layer.assumptions
-        i < dropLength
-        /* If i < dropLength is false, the current - and last-to-drop - layer won't be
-         * dropped, but its assumptions have already been removed from allAssumptions.
-         * Subsequently taking the tail of the remaining layers results in also
-         * dropping the last layer that needs to be dropped.
-         */
-      }).tail
+    val snapshotsFromLastDroppedLayer = assumptionSnapshots.drop(dropLength - 1)
+    allAssumptions = snapshotsFromLastDroppedLayer.head
+    assumptionSnapshots = snapshotsFromLastDroppedLayer.tail
+    layers = layers.drop(dropLength)
   }
 
   def branchConditions: Stack[Term] = layers.flatMap(_.branchCondition)
@@ -650,6 +644,7 @@ private[decider] class LayeredPathConditionStack
 
     /* Sharing immutable data is safe */
     clonedStack.allAssumptions = allAssumptions
+    clonedStack.assumptionSnapshots = assumptionSnapshots
     clonedStack.markToLength = markToLength
     clonedStack.scopeMarks = scopeMarks
 
@@ -663,6 +658,15 @@ private[decider] class LayeredPathConditionStack
   override def definitionsOnly: RecordedPathConditions = {
     val result = duplicate()
     result.layers = layers map (_.definitionsOnly())
+
+    // Project the rollback history as well, so popping the copy cannot restore non-definitions.
+    var definitionsBeforeLayer = InsertionOrderedSet.empty[Term]
+    result.assumptionSnapshots = result.layers.reverse.map { layer =>
+      val snapshot = definitionsBeforeLayer
+      definitionsBeforeLayer ++= layer.assumptions
+      snapshot
+    }.reverse
+
     result.allAssumptions = InsertionOrderedSet(layers.flatMap(_.globalDefiningAssumptions) ++
       layers.flatMap(_.nonGlobalDefiningAssumptions))
     result
