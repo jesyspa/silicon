@@ -347,7 +347,7 @@ def execute(args, arms, manifests):
                     args, index, runner, jar=arm['jar'], cpus=cpus,
                     label=f'{arm["name"]}-lane{index}', warmup=[
                         [*w[:-1], *arm['verifier_arg'], w[-1]] for w in warmup],
-                    jvm_arg=[*args.jvm_arg, *arm['jvm_arg'], f'-Xlog:gc:file={gc}:uptime'])
+                    jvm_arg=[*args.jvm_arg, *arm['jvm_arg'], f'-Xlog:gc,gc+cpu:file={gc}:uptime'])
             try:
                 while not failed.is_set():
                     if (args.output_directory / 'STOP').exists():
