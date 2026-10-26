@@ -52,9 +52,20 @@ class SiliconTests extends SilSuite {
 
   override def configureVerifiersFromConfigMap(configMap: Map[String, Any]): Unit = {
     val args = Silicon.optionsFromScalaTestConfigMap(prefixSpecificConfigMap(configMap).getOrElse("silicon", Map()))
-    silicon.parseCommandLine(commandLineArguments ++ args :+ Silicon.dummyInputFilename)
+    silicon.parseCommandLine(commandLineArguments ++ proverMemoryArguments(args) ++ args :+ Silicon.dummyInputFilename)
   }
 
   val commandLineArguments: Seq[String] =
     Seq("--timeout", "600" /* seconds */)
+
+  /* A runaway Z3 query (e.g. a matching loop in linked-list-qp-append) grows by about 30 MB/s and
+   * otherwise gets the whole run killed at 8 GB. With a cap Z3 reports out-of-memory, which Silicon
+   * answers as a memory-out. Added here so subclasses need not repeat it, unless they or the
+   * config map set --proverArgs themselves.
+   */
+  val proverMemoryMB = 3000
+
+  private def proverMemoryArguments(configArgs: Seq[String]): Seq[String] =
+    if ((commandLineArguments ++ configArgs).contains("--proverArgs")) Seq()
+    else Seq("--proverArgs", s"memory_max_size=$proverMemoryMB")
 }
