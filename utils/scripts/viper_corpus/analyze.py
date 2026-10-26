@@ -65,13 +65,22 @@ def compare(files, baseline, arm, metric, threshold, samples, rng):
     for path, arms in sorted(files.items()):
         a, b = arms.get(baseline, {}), arms.get(arm, {})
         seeds = set(a)
-        if not seeds or set(b) != seeds:
+        if not seeds or not b:
             continue
-        caps = [r.get('timeout_s') for r in b.values() if r['outcome'] == 'capped']
-        base = [value(r, metric) for r in a.values()]
-        if caps and None not in base and 'wall' in metric:
-            capped.append(dict(path=path, seeds=len(seeds), capped=len(caps),
-                               at_least=min(caps) / statistics.median(base)))
+        if set(b) != seeds:
+            excluded += 1
+            continue
+        if any(r['outcome'] == 'capped' for r in b.values()):
+            # A capped run took at least its cap, so the median with caps substituted is a bound.
+            base = [value(r, metric) for r in a.values()]
+            cand = [r.get('timeout_s') if r['outcome'] == 'capped' else value(r, metric)
+                    for r in b.values()]
+            if 'wall' in metric and None not in base + cand:
+                capped.append(dict(path=path, seeds=len(seeds),
+                                   capped=sum(r['outcome'] == 'capped' for r in b.values()),
+                                   at_least=statistics.median(cand) / statistics.median(base)))
+            else:
+                excluded += 1
             continue
         outcomes = {r['outcome'] for r in [*a.values(), *b.values()]}
         values = [value(r, metric) for r in [*a.values(), *b.values()]]

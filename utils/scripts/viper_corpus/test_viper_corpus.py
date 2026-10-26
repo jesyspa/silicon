@@ -684,10 +684,13 @@ for line in sys.stdin:
         task, _ = schedule.get(0)
         schedule.complete(task, dict(path=row['path'], arm='W', seed=2, outcome='verified', wall_s=20))
         self.assertEqual(schedule.get(0), (None, True))
-        # Resume: completed records plan nothing again.
+        # Resume: completed records, extension seeds included, plan nothing again.
         done = [dict(path=row['path'], arm=a, seed=s, outcome='verified', wall_s=10)
                 for a in 'MW' for s in (0, 1)]
         self.assertEqual(len(night.Schedule(tasks, done, ['M', 'W'], 'M')), 0)
+        done = [r for r in schedule.records[row['path']].values()]
+        resumed = night.Schedule(tasks, done, ['M', 'W'], 'M', (0.2, 3), night.random.Random(0))
+        self.assertEqual((len(resumed), resumed.seeds[row['path']]), (0, {0, 1, 2}))
 
     def test_night_caps_arm_timeouts_and_records_capped(self):
         rows = run.read_jsonl(self.manifest()[0])
@@ -710,6 +713,14 @@ for line in sys.stdin:
         report = analyze.analyze([args.output_directory], 'M', ['wall_s'], 2.0, 50, [])
         c = report['subsets']['all']['comparisons']['W']['wall_s']
         self.assertEqual((c['n'], [x['at_least'] for x in c['capped']]), (0, [48 / 7.5]))
+        # One capped seed of three bounds the median, not the cap ratio.
+        b = lambda arm, seed, wall, outcome='verified': dict(path='p', arm=arm, seed=seed,
+                                                            outcome=outcome, wall_s=wall, timeout_s=40)
+        files = {'p': {'M': {s: b('M', s, 10) for s in range(3)},
+                       'W': {0: b('W', 0, 41, 'capped'), 1: b('W', 1, 11), 2: b('W', 2, 12)}},
+                 'q': {'M': {0: b('M', 0, 1), 1: b('M', 1, 1)}, 'W': {0: b('W', 0, 1)}}}
+        c = analyze.compare(files, 'M', 'W', 'wall_s', 2.0, 50, analyze.random.Random(0))
+        self.assertEqual(([x['at_least'] for x in c['capped']], c['excluded']), ([1.2], 1))
 
     def test_night_profile_seeds_are_snapshotted_and_shared_by_arms(self):
         rows = run.read_jsonl(self.manifest()[0])

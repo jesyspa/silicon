@@ -178,16 +178,21 @@ class Schedule:
             self.open[row['path']] = self.open.get(row['path'], 0) + 1
 
     def grow(self, path):
-        """Plan one more seed of a finished file whose paired interval is still wide."""
-        seeds = sorted(self.seeds[path])
+        """Plan more seeds of a finished file while its paired interval is still wide.
+
+        A seed whose records exist, from before a resume, is taken as done.
+        """
         records = self.records.get(path, {})
-        if (self.extend and len(seeds) < self.extend[1] and
-                all((a, s) in records for a in self.arms for s in seeds) and
-                wide(records, self.arms, self.baseline, seeds, self.extend[0])):
-            seed = seeds[-1] + 1
-            self.seeds[path].add(seed)
-            for index, task in enumerate(block(self.rows[path], self.arms, [seed], self.rng,
-                                               self.baseline)):
+        while True:
+            seeds = sorted(self.seeds[path])
+            if not (self.extend and len(seeds) < self.extend[1] and
+                    all((a, s) in records for a in self.arms for s in seeds) and
+                    wide(records, self.arms, self.baseline, seeds, self.extend[0])):
+                return
+            self.seeds[path].add(seeds[-1] + 1)
+            missing = [t for t in block(self.rows[path], self.arms, [seeds[-1] + 1], self.rng,
+                                        self.baseline) if (t[1], t[2]) not in records]
+            for index, task in enumerate(missing):
                 self.add(*task, at=index)
 
     def get(self, timeout):
@@ -272,13 +277,12 @@ def execute(args, arms, manifests):
     args.output_directory.mkdir(parents=True, exist_ok=True)
     with (args.output_directory / '.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Resumes use this snapshot, so later noise.py runs cannot change the plan.
         profile = args.output_directory / 'profile.json'
-        if getattr(args, 'profile', None) and not profile.exists():
-            # Resumes use this snapshot, so later noise.py runs cannot change the plan.
-            shutil.copyfile(args.profile, profile)
         extra = {}
         if getattr(args, 'profile', None):
-            extra = dict(profile=sha256(profile), seed_policy=args.seed_policy,
+            extra = dict(profile=sha256(profile if profile.exists() else args.profile),
+                         seed_policy=args.seed_policy,
                          targeted=[sha256(m) for m in args.targeted])
         if getattr(args, 'baseline', None):
             extra.update(baseline=args.baseline, cap_factor=args.cap_factor, cap_min=args.cap_min,
@@ -305,6 +309,8 @@ def execute(args, arms, manifests):
             temporary = config_path.with_suffix('.tmp')
             temporary.write_text(json.dumps(config, indent=2) + '\n')
             temporary.replace(config_path)
+        if getattr(args, 'profile', None) and not profile.exists():
+            shutil.copyfile(args.profile, profile)
         results = args.output_directory / 'results.jsonl'
         done = set()
         for row in run.read_jsonl(results, repair=True):
