@@ -416,7 +416,7 @@ object consumer extends ConsumptionRules {
   private def loopingMatch(p: Term, b: Term, vars: Seq[Var]): Boolean = {
     val binding = mutable.Map.empty[Var, Term]
     def bind(p: Term, b: Term): Boolean = p match {
-      case x: Var if vars.contains(x) => binding.getOrElseUpdate(x, b) == b
+      case x: Var if vars.contains(x) => x.sort == b.sort && binding.getOrElseUpdate(x, b) == b
       case _ => p.getClass == b.getClass && p.subterms.length == b.subterms.length &&
                 p.subterms.zip(b.subterms).forall { case (p1, b1) => bind(p1, b1) }
     }
