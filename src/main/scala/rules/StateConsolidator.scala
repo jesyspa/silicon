@@ -25,6 +25,7 @@ import viper.silver.ast.MagicWandStructure.MagicWandStructure
 import viper.silver.parser.PUnknown
 
 import scala.annotation.unused
+import scala.collection.mutable
 
 trait StateConsolidationRules extends SymbolicExecutionRules {
   def consolidate(s: State, v: Verifier): State
@@ -179,30 +180,75 @@ class DefaultStateConsolidator(protected val config: Config) extends StateConsol
     val sepIdentifier = v.symbExLog.openScope(mergeLog)
     // bookkeeper.heapMergeIterations += 1
 
-    val initial = (fr, destChunks, Seq[Chunk](), InsertionOrderedSet[Term]())
+    val mergedChunks = new MergeChunkIndex(destChunks)
+    var functionRecorder = fr
+    var newlyAddedChunks = List.empty[Chunk]
+    var snapshotEqualities = InsertionOrderedSet[Term]()
 
-    val result = newChunks.foldLeft(initial) { case ((fr1, accMergedChunks, accNewChunks, accSnapEqs), nextChunk) =>
-      /* accMergedChunks: already merged chunks
-       * accNewChunks: newly added chunks
-       * accSnapEqs: collected snapshot equalities
-       * nextChunk: current chunk from the sequence of new chunks/of chunks to merge into the
-       *           sequence of destination chunks
-       */
-
-      findMatchingChunk(accMergedChunks, nextChunk, v) match {
+    newChunks.foreach { nextChunk =>
+      val addedChunk = findMatchingChunk(mergedChunks.candidates(nextChunk), nextChunk, v) match {
         case Some(ch) =>
-          mergeChunks(fr1, s, ch, nextChunk, qvars, v) match {
+          mergeChunks(functionRecorder, s, ch, nextChunk, qvars, v) match {
             case Some((fr2, newChunk, snapEq)) =>
-              (fr2, newChunk +: accMergedChunks.filterNot(_ == ch), newChunk +: accNewChunks, accSnapEqs ++ snapEq)
-            case None =>
-              (fr1, nextChunk +: accMergedChunks, nextChunk +: accNewChunks, accSnapEqs)
+              functionRecorder = fr2
+              snapshotEqualities = snapshotEqualities ++ snapEq
+              mergedChunks.remove(ch)
+              newChunk
+            case None => nextChunk
           }
-        case None =>
-          (fr1, nextChunk +: accMergedChunks, nextChunk +: accNewChunks, accSnapEqs)
+        case None => nextChunk
       }
+      mergedChunks.prepend(addedChunk)
+      newlyAddedChunks = addedChunk :: newlyAddedChunks
     }
     v.symbExLog.closeScope(sepIdentifier)
-    result
+    (functionRecorder, mergedChunks.result(), newlyAddedChunks, snapshotEqualities)
+  }
+
+  /** A merge-local index, retaining the same order as prepending to the destination heap.
+    * Matchers inspect only chunks with an equal identifier. Indexing that first filter avoids
+    * scanning unrelated resources on every insertion. Each bucket retains heap order; the
+    * hash map is never iterated, so matcher and prover query order are unchanged. Entries
+    * are kept in reverse heap order so prepending and removing matches do not copy the whole heap.
+    */
+  private final class MergeChunkIndex(initial: Seq[Chunk]) {
+    private final class Entry(val chunk: Chunk) {
+      var live: Boolean = true
+    }
+
+    private val entries = mutable.ArrayBuffer.empty[Entry]
+    private val byId = mutable.HashMap.empty[ChunkIdentifer, List[Entry]]
+    initial.reverseIterator.foreach(prepend)
+
+    def prepend(chunk: Chunk): Unit = {
+      val entry = new Entry(chunk)
+      entries += entry
+      chunk match {
+        case ch: GeneralChunk => byId.update(ch.id, entry :: byId.getOrElse(ch.id, Nil))
+        case _ =>
+      }
+    }
+
+    def candidates(chunk: Chunk): Iterable[Chunk] = chunk match {
+      case ch: GeneralChunk => byId.getOrElse(ch.id, Nil).map(_.chunk)
+      case _ => Nil
+    }
+
+    def remove(chunk: Chunk): Unit = chunk match {
+      case ch: GeneralChunk =>
+        // Remove every equal occurrence, matching the heap's filterNot semantics. Distinct
+        // entries are necessary because equal chunks can occur more than once in a heap.
+        val remaining = byId(ch.id).filterNot { entry =>
+          val remove = entry.chunk == chunk
+          if (remove) entry.live = false
+          remove
+        }
+        byId.update(ch.id, remaining)
+      case _ => throw new IllegalArgumentException("Only general chunks can be merged")
+    }
+
+    def result(): Seq[Chunk] =
+      entries.reverseIterator.filter(_.live).map(_.chunk).toVector
   }
 
   private def findMatchingChunk(chunks: Iterable[Chunk], chunk: Chunk, v: Verifier): Option[Chunk] = {
