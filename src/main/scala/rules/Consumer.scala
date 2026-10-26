@@ -400,6 +400,8 @@ object consumer extends ConsumptionRules {
    */
   private val noReassumeSelfMatch: Boolean =
     sys.props.get("silicon.exp.noReassumeSelfMatch").contains("true")
+  private val logNoReassumeSelfMatch: Boolean =
+    sys.props.get("silicon.exp.noReassumeSelfMatch.log").contains("true")
 
   private def isSelfMatching(t: Term): Boolean = t match {
     case q: Quantification if q.q == Forall =>
@@ -457,7 +459,10 @@ object consumer extends ConsumptionRules {
         }
         v2.decider.assert(termToAssert) {
           case true =>
-            if (!(noReassumeSelfMatch && isSelfMatching(t)))
+            if (noReassumeSelfMatch && isSelfMatching(t)) {
+              if (logNoReassumeSelfMatch)
+                System.err.println(s"[noReassumeSelfMatch] skipped re-assume of ${e.pos}: ${t.asInstanceOf[Quantification].toString(true)}")
+            } else
               v2.decider.assume(t, Option.when(debugOn)(e), eNew)
             QS(s2, v2)
           case false =>
