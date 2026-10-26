@@ -14,7 +14,9 @@ import analyze
 import compare
 import curate
 import night
+import noise
 import run
+import tiers
 
 
 class CorpusTests(unittest.TestCase):
@@ -574,6 +576,199 @@ for line in sys.stdin:
         self.assertAlmostEqual(report['gc']['W']['log_pause_s'], 0.3)
         self.assertAlmostEqual(report['gc']['W']['log_share'], 0.3 / 30)
         self.assertIn('| W | wall_s | 1 |', analyze.markdown(report))
+
+    def night_args(self, rows, **extra):
+        args, _ = self.args()
+        args.manifest, args.order_seed, args.lane_memory_max = [args.manifest], 0, '1G'
+        args.warmup, args.warmup_runs, args.window, args.lanes = [], 1, None, ['0']
+        args.seeds, args.profile, args.targeted = [0, 1], None, []
+        args.baseline, args.cap_factor, args.cap_min = 'M', 4.0, 30
+        args.extend_width, args.max_seeds = None, 10
+        vars(args).update(extra)
+        arms = [dict(name=n, jar=args.jar, jvm_arg=[], verifier_arg=[]) for n in 'MW']
+        del args.jar
+        return args, arms
+
+    def test_noise_profile_classes_per_jar_and_file(self):
+        out = self.root / 'n1'
+        out.mkdir()
+        (out / 'run.json').write_text(json.dumps(dict(arms=dict(M=dict(sha256='m'),
+                                                                W=dict(sha256='w')))))
+        rows = []
+        walls = dict(quiet=(10, 11), mid=(10, 15), noisy=(1, 3), cut=(5, 6))
+        for path, (x, y) in walls.items():
+            rows += [dict(path=path, arm='M', seed=0, outcome='verified', wall_s=x),
+                     dict(path=path, arm='M', seed=1, outcome='verified', wall_s=y)]
+        rows += [dict(path='quiet', arm='W', seed=s, outcome='verified', wall_s=30) for s in (0, 1)]
+        rows += [dict(path='flip', arm='M', seed=s, outcome=o, wall_s=9)
+                 for s, o in enumerate(['verified', 'timeout'])]
+        rows += [dict(path='slow', arm=a, seed=s, outcome='timeout', wall_s=301)
+                 for a in 'MW' for s in (0, 1)]
+        rows += [dict(path='cut', arm='W', seed=s, outcome='capped', wall_s=24) for s in (0, 1)]
+        (out / 'results.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in rows) + '{"part')
+        files = noise.profile([out])['files']
+        self.assertEqual({p: f['class'] for p, f in files.items()},
+                         dict(quiet='quiet', mid='mid', noisy='noisy', flip='flips',
+                              slow='always-timeout', cut='quiet'))
+        self.assertEqual(files['quiet']['median_wall_s'], (10.5 + 30) / 2)
+        self.assertEqual(set(files['cut']['jars']), {'m'})
+        self.assertEqual(noise.file_class(['always-timeout', 'quiet', 'mid']), 'mid')
+        self.assertEqual(noise.file_class([None]), 'unknown')
+
+    def test_night_seed_policy_and_baseline_first_plan(self):
+        policy = night.parse_policy('flips=10', min_seeds=1)
+        count = lambda entry, targeted=False: night.seed_count(entry, policy, targeted)
+        self.assertEqual([count(dict(**{'class': c}, median_wall_s=60)) for c in
+                          ('quiet', 'mid', 'noisy', 'flips', 'always-timeout', 'unknown')],
+                         [2, 3, 6, 10, 1, 3])
+        self.assertEqual(count({'class': 'always-timeout'}, targeted=True), 3)
+        self.assertEqual(count({'class': 'quiet', 'median_wall_s': 1}), 3)
+        self.assertEqual(count({}), 3)
+        self.assertEqual(night.seed_count({}, night.parse_policy('', 10)), 10)
+        with self.assertRaises(ValueError):
+            night.parse_policy('loud=3')
+        rows = [dict(path='A/a.vpr'), dict(path='A/b.vpr')]
+        tasks = night.plan([rows], ['W', 'M'], lambda r: [0, 1] if r['path'] == 'A/a.vpr' else [0],
+                           3, baseline='M')
+        for path, n in (('A/a.vpr', 2), ('A/b.vpr', 1)):
+            mine = [(arm, seed) for row, arm, seed in tasks if row['path'] == path]
+            self.assertEqual(sorted(mine), sorted((a, s) for a in 'MW' for s in range(n)))
+            self.assertEqual({arm for arm, _ in mine[:n]}, {'M'})
+
+    def test_night_cap_and_paired_interval(self):
+        r = lambda arm, wall, outcome='verified': dict(arm=arm, outcome=outcome, wall_s=wall)
+        records = {('M', 0): r('M', 20), ('M', 1): r('M', 5)}
+        self.assertEqual(night.cap(records, 'M', 4, 30, 300), 80)
+        self.assertEqual(night.cap({('M', 0): r('M', 2)}, 'M', 4, 30, 300), 30)
+        self.assertEqual(night.cap({('M', 0): r('M', 200)}, 'M', 4, 30, 300), 300)
+        self.assertEqual(night.cap({('M', 0): r('M', 9, 'timeout')}, 'M', 4, 30, 300), 300)
+        self.assertEqual(night.cap({}, 'M', 4, 30, 300), 300)
+        close = {('M', 0): r('M', 10), ('M', 1): r('M', 10), ('W', 0): r('W', 9), ('W', 1): r('W', 9.1)}
+        far = {**close, ('W', 1): r('W', 20)}
+        self.assertFalse(night.wide(close, ['M', 'W'], 'M', [0, 1], 0.2))
+        self.assertTrue(night.wide(far, ['M', 'W'], 'M', [0, 1], 0.2))
+        self.assertFalse(night.wide({**far, ('W', 1): r('W', 20, 'capped')},
+                                    ['M', 'W'], 'M', [0, 1], 0.2))
+
+    def test_night_schedule_waits_for_baseline_and_extends_wide_files(self):
+        row = dict(path='A/a.vpr')
+        tasks = night.plan([[row]], ['M', 'W'], [0, 1], 0, baseline='M')
+        schedule = night.Schedule(tasks, [], ['M', 'W'], 'M', (0.2, 3), night.random.Random(0))
+        first, _ = schedule.get(0)
+        second, _ = schedule.get(0)
+        self.assertEqual({first[1], second[1]}, {'M'})
+        self.assertEqual(schedule.get(0), (None, False))  # W waits for the baseline
+        walls = dict(M=10, W=10)
+        for task in (first, second):
+            schedule.complete(task, dict(path=row['path'], arm='M', seed=task[2],
+                                         outcome='verified', wall_s=walls['M']))
+        self.assertEqual(schedule.timeout(row, 'W', 4, 30, 300), 40)
+        for seed in (0, 1):
+            task, _ = schedule.get(0)
+            self.assertEqual(task[1], 'W')
+            schedule.complete(task, dict(path=row['path'], arm='W', seed=task[2],
+                                         outcome='verified', wall_s=[9, 20][task[2]]))
+        # Wide: seed 2 for both arms, baseline first; then the seed limit stops it.
+        task, _ = schedule.get(0)
+        self.assertEqual(task[1:], ('M', 2))
+        self.assertEqual(len(schedule), 1)
+        schedule.complete(task, dict(path=row['path'], arm='M', seed=2, outcome='verified', wall_s=10))
+        task, _ = schedule.get(0)
+        schedule.complete(task, dict(path=row['path'], arm='W', seed=2, outcome='verified', wall_s=20))
+        self.assertEqual(schedule.get(0), (None, True))
+        # Resume: completed records plan nothing again.
+        done = [dict(path=row['path'], arm=a, seed=s, outcome='verified', wall_s=10)
+                for a in 'MW' for s in (0, 1)]
+        self.assertEqual(len(night.Schedule(tasks, done, ['M', 'W'], 'M')), 0)
+
+    def test_night_caps_arm_timeouts_and_records_capped(self):
+        rows = run.read_jsonl(self.manifest()[0])
+        args, arms = self.night_args(rows)
+        timeouts = []
+
+        def measure(row, task, lane):
+            timeouts.append((lane.label.split('-')[0], task.timeout))
+            if lane.label.startswith('W'):
+                return dict(outcome='timeout', wall_s=task.timeout + 1, seed=task.seed)
+            return dict(outcome='verified', wall_s=[3, 12][task.seed], seed=task.seed)
+
+        with patch.object(run, 'build_runner', return_value=args.java), \
+                patch.object(run, 'run_warm_once', side_effect=measure):
+            night.execute(args, arms, [rows])
+        self.assertEqual(sorted(timeouts), [('M', 300), ('M', 300), ('W', 48), ('W', 48)])
+        records = run.read_jsonl(args.output_directory / 'results.jsonl')
+        self.assertEqual({(r['arm'], r['outcome'], r['timeout_s']) for r in records},
+                         {('M', 'verified', 300), ('W', 'capped', 48)})
+        report = analyze.analyze([args.output_directory], 'M', ['wall_s'], 2.0, 50, [])
+        c = report['subsets']['all']['comparisons']['W']['wall_s']
+        self.assertEqual((c['n'], [x['at_least'] for x in c['capped']]), (0, [48 / 7.5]))
+
+    def test_night_profile_seeds_are_snapshotted_and_shared_by_arms(self):
+        rows = run.read_jsonl(self.manifest()[0])
+        profile = self.root / 'profile.json'
+        profile.write_text(json.dumps(dict(files={rows[0]['path']: {'class': 'noisy',
+                                                                    'median_wall_s': 50}})))
+        args, arms = self.night_args(rows, seeds=None, profile=profile, baseline=None,
+                                     seed_policy=night.parse_policy(''))
+        seen = []
+
+        def measure(row, task, lane):
+            seen.append((lane.label[0], task.seed))
+            return dict(outcome='verified', wall_s=1, seed=task.seed)
+
+        with patch.object(run, 'build_runner', return_value=args.java), \
+                patch.object(run, 'run_warm_once', side_effect=measure):
+            night.execute(args, arms, [rows])
+            profile.write_text(json.dumps(dict(files={})))
+            night.execute(args, arms, [rows])  # resumes from the snapshot: nothing to run
+        self.assertEqual(sorted(seen), [(a, s) for a in 'MW' for s in range(6)])
+        self.assertIn('noisy', (args.output_directory / 'profile.json').read_text())
+
+    def test_warm_defaults_respect_explicit_settings(self):
+        self.assertEqual(run.warm_defaults(['-Xmx4g'], []),
+                         (['-Xmx4g', '-Xss512m'], ['--numberOfParallelVerifiers', '1']))
+        self.assertEqual(run.warm_defaults(['-Xss64m'], ['--numberOfParallelVerifiers=4']),
+                         (['-Xss64m'], ['--numberOfParallelVerifiers=4']))
+
+    def test_tiers_tags_select_t1_and_cost(self):
+        text = """// xs ++ ys in a comment is ignored
+            method m(xs: Seq[Int]) requires forall i: Int :: i in [0..3) ==> acc(a[i].f)
+            { var y: Seq[Int] := xs[1..]; assert xs[0] == y[..2][0]; package true --* true }"""
+        self.assertEqual(tiers.scan(text), ['qp', 'seq', 'seq_index', 'seq_slice', 'wand'])
+        self.assertIn('prusti_lifetime', tiers.scan('inhale acc(DeadLifetimeToken(l))'))
+        self.assertIn('qp_predicate', tiers.scan('inhale forall x: Ref :: x in s ==> acc(P(x))'))
+        self.assertNotIn('seq_index', tiers.scan('var x: Map[Int, Int]'))
+        rows = [dict(path=f'A/{i}.vpr') for i in range(10)]
+        tags = {'A/0.vpr': ['wand'], 'A/1.vpr': ['seq']}
+        chosen = tiers.select(rows, tags, {'wand'}, 3, 1)
+        self.assertEqual(len(chosen), 4)
+        self.assertIn(rows[0], chosen)
+        self.assertEqual(chosen, tiers.select(list(reversed(rows)), tags, {'wand'}, 3, 1))
+        profile = dict(files={'A/0.vpr': {'class': 'quiet', 'median_wall_s': 8},
+                              'A/1.vpr': {'class': 'flips', 'median_wall_s': 1},
+                              'A/2.vpr': {'class': 'always-timeout', 'median_wall_s': None},
+                              'A/3.vpr': {'class': 'quiet', 'median_wall_s': 1}})
+        t1 = [r['path'] for r in tiers.t1(rows, profile, 5, 2, 0)]
+        self.assertEqual(len(t1), 5)
+        self.assertTrue({'A/0.vpr', 'A/1.vpr', 'A/2.vpr'} <= set(t1))
+        hours, runs, missing = tiers.cost(rows[:4], profile, night.parse_policy(''), 30, 300)
+        self.assertEqual((runs, missing), (3 + 6 + 1 + 3, 0))
+        self.assertAlmostEqual(hours * 3600, 3 * 8 + 6 * 1 + 300 + 3 * 1)
+
+    def test_tiers_t0_copies_imports_and_records_arguments(self):
+        self.source('F/_preambles/p.vpr', 'domain D {}')
+        self.source('F/x/a.vpr', 'import "../_preambles/p.vpr"\nmethod a() {}')
+        extra = self.root / 'test.vpr'
+        extra.write_text('method t() {}')
+        spec = tiers.parse_spec(f'# cases\nF/x/a.vpr\nSil/t.vpr {extra} -- --maskHeapMode\n')
+        root = self.root / 't0'
+        rows = tiers.build_t0(spec, self.corpus, root)
+        self.assertTrue((root / 'F/_preambles/p.vpr').exists())
+        self.assertEqual([(r['path'], r['group'], r.get('verifier_args')) for r in rows],
+                         [('F/x/a.vpr', 'F', None), ('Sil/t.vpr', 'Sil', ['--maskHeapMode'])])
+        manifest = self.root / 't0.jsonl'
+        curate.write_manifest(manifest, rows)
+        self.assertEqual(run.load_manifest(manifest, root), rows)
 
 
 if __name__ == '__main__':

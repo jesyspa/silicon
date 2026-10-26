@@ -88,6 +88,15 @@ def outcome(measurement, log):
 SEED_PARAMETERS = ('smt.random_seed', 'sat.random_seed')
 
 
+def warm_defaults(jvm_arg, verifier_arg):
+    """Add 512 MiB thread stacks and one parallel verifier unless the arguments set them."""
+    if not any(a.startswith('-Xss') for a in jvm_arg):
+        jvm_arg = [*jvm_arg, '-Xss512m']
+    if not any(a.startswith('--numberOfParallelVerifiers') for a in verifier_arg):
+        verifier_arg = [*verifier_arg, '--numberOfParallelVerifiers', '1']
+    return jvm_arg, verifier_arg
+
+
 def verifier_args(row, args):
     """Common then per-input Silicon arguments, with the seed merged into --proverArgs.
 
@@ -301,7 +310,7 @@ class Lane:
         self.process = None
         return process.returncode
 
-    def verify(self, log, options):
+    def verify(self, log, options, timeout=None):
         """Return (response or None, failed outcome, runner context) for one request."""
         if self.process is None or self.process.poll() is not None:
             self.stop()
@@ -309,17 +318,17 @@ class Lane:
         context = dict(lane=self.index, runner_start=self.starts, runner_served=self.served,
                        after_restart=self.starts > 1)
         self.served += 1
-        response, failure = self.request(log, options)
+        response, failure = self.request(log, options, timeout)
         return response, failure, context
 
-    def request(self, log, options):
+    def request(self, log, options, timeout=None):
         """Exchange one request on a started runner; discard it on any failure.
 
         Warm-ups use this same boundary so an unfinished warm-up can never be
         mistaken for a measured input's response. This method does not restart.
         """
         kills = oom_kills(self.cgroup)
-        deadline = time.monotonic() + self.args.timeout + HANG_GRACE_S
+        deadline = time.monotonic() + (timeout or self.args.timeout) + HANG_GRACE_S
         protocol_error = None
         try:
             sent = self.send(log, options, deadline)
@@ -360,7 +369,7 @@ def run_warm_once(row, args, lane):
     directory.mkdir(parents=True)
     options = ['--prover', 'Z3', '--z3Exe', str(args.z3), '--timeout', str(args.timeout),
                *verifier_args(row, args), str(args.corpus_root / row['path'])]
-    response, failure, context = lane.verify(directory / 'stdout.log', options)
+    response, failure, context = lane.verify(directory / 'stdout.log', options, args.timeout)
     measurement = dict(response or {}, **context, failure=failure)
     (directory / 'measurement.json').write_text(json.dumps(measurement, indent=2) + '\n')
     log_path = directory / 'stdout.log'
@@ -473,7 +482,8 @@ def main(argv=None):
     parser.add_argument('--seed', type=int,
                         help='Z3 ' + ' and '.join(SEED_PARAMETERS) + ', merged into --proverArgs')
     parser.add_argument('--warm', action='store_true',
-                        help='verify in one long-lived JVM per job instead of cgroup-isolated processes')
+                        help='verify in one long-lived JVM per job instead of cgroup-isolated '
+                             'processes; defaults to -Xss512m and --numberOfParallelVerifiers 1')
     parser.add_argument('--warm-runs', type=int, default=1,
                         help='verifications per file in --warm mode; the last is measured')
     parser.add_argument('--lane-memory-max', default='7G',
@@ -489,6 +499,8 @@ def main(argv=None):
         parser.error('jobs and timeout must be positive')
     if any(v is not None and v < 0 for v in (args.solver_memory_max, args.solver_swap_max)):
         parser.error('solver memory/swap limits must be nonnegative')
+    if args.warm:
+        args.jvm_arg, args.verifier_arg = warm_defaults(args.jvm_arg, args.verifier_arg)
     for name in ('corpus_root', 'manifest', 'output_directory', 'cgroup_root', 'jar', 'java', 'z3'):
         if getattr(args, name) is not None:
             setattr(args, name, getattr(args, name).resolve())

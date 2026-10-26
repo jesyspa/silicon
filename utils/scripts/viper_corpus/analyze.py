@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Analyse a seeded night.py run; ratios are arm / baseline.
 
-Per file and arm the metric is the median across seeds. A file is unstable when
-max/min across seeds exceeds --unstable in any arm. Timing compares a file only
-when every seed of both arms has the same verified or failed outcome and a
-positive metric. Stable files give a geometric mean ratio with a percentile
-bootstrap CI over files; unstable files and outcome changes are listed apart.
+Per file and arm the metric is the median across seeds. Files may have
+different seeds, but both arms must have the same seeds of a file. A file is
+unstable when max/min across seeds exceeds --unstable in any arm. Timing
+compares a file only when it has at least two seeds and every seed of both arms
+has the same verified or failed outcome and a positive metric. Stable files give
+a geometric mean ratio with a percentile bootstrap CI over files; unstable
+files and outcome changes are listed apart. A file with a capped arm run is a
+regression of at least the cap over the baseline median and is listed apart.
 GC pause share comes from the runners' -Xlog:gc logs.
 """
 import argparse
@@ -57,19 +60,26 @@ def bootstrap(ratios, samples, rng, level=0.95):
     return [means[int(tail * samples)], means[min(samples - 1, int((1 - tail) * samples))]]
 
 
-def compare(files, baseline, arm, seeds, metric, threshold, samples, rng):
-    ratios, unstable, excluded = [], [], 0
+def compare(files, baseline, arm, metric, threshold, samples, rng):
+    ratios, unstable, capped, excluded = [], [], [], 0
     for path, arms in sorted(files.items()):
         a, b = arms.get(baseline, {}), arms.get(arm, {})
-        if set(a) != set(seeds) or set(b) != set(seeds):
+        seeds = set(a)
+        if not seeds or set(b) != seeds:
+            continue
+        caps = [r.get('timeout_s') for r in b.values() if r['outcome'] == 'capped']
+        base = [value(r, metric) for r in a.values()]
+        if caps and None not in base and 'wall' in metric:
+            capped.append(dict(path=path, seeds=len(seeds), capped=len(caps),
+                               at_least=min(caps) / statistics.median(base)))
             continue
         outcomes = {r['outcome'] for r in [*a.values(), *b.values()]}
         values = [value(r, metric) for r in [*a.values(), *b.values()]]
-        if len(outcomes) != 1 or None in values:
+        if len(outcomes) != 1 or None in values or len(seeds) < 2:
             excluded += 1
             continue
         spreads = {name: s for name, recs in arms.items()
-                   if set(recs) == set(seeds) and (s := spread(recs, metric)) is not None}
+                   if set(recs) == seeds and (s := spread(recs, metric)) is not None}
         if max(spreads.values()) > threshold:
             unstable.append(dict(path=path, spread={k: round(v, 2) for k, v in spreads.items()}))
             continue
@@ -78,6 +88,7 @@ def compare(files, baseline, arm, seeds, metric, threshold, samples, rng):
         ratios.append(dict(path=path, baseline=base, arm=cand, ratio=cand / base))
     values = [r['ratio'] for r in ratios]
     return dict(n=len(values), excluded=excluded, unstable=unstable,
+                capped=sorted(capped, key=lambda c: -c['at_least']),
                 geomean=geomean(values) if values else None,
                 ci95=bootstrap(values, samples, rng),
                 regressions=sorted(ratios, key=lambda r: -r['ratio'])[:10],
@@ -143,7 +154,7 @@ def analyze(directories, baseline, metrics, threshold, samples, subsets, seed=0)
     for name, paths in [('all', None), *subsets]:
         chosen = {p: v for p, v in files.items() if paths is None or p in paths}
         report['subsets'][name] = dict(files=len(chosen), comparisons={
-            arm: {metric: compare(chosen, baseline, arm, seeds, metric, threshold, samples,
+            arm: {metric: compare(chosen, baseline, arm, metric, threshold, samples,
                                   random.Random(seed))
                   for metric in metrics}
             for arm in arms if arm != baseline})
@@ -161,13 +172,20 @@ def markdown(report):
            'in any arm; 95% percentile bootstrap CI over stable files.', '']
     for name, subset in report['subsets'].items():
         out += [f'## Ratios: {name} ({subset["files"]} files)', '',
-                '| arm | metric | n stable | geomean | 95% CI | unstable | excluded |',
-                '|---|---|---|---|---|---|---|']
+                '| arm | metric | n stable | geomean | 95% CI | unstable | capped | excluded |',
+                '|---|---|---|---|---|---|---|---|']
         for arm, metrics in subset['comparisons'].items():
             for metric, c in metrics.items():
                 ci = c['ci95'] and f'[{fmt(c["ci95"][0])}, {fmt(c["ci95"][1])}]'
                 out.append(f'| {arm} | {metric} | {c["n"]} | {fmt(c["geomean"])} | {ci or "-"} '
-                           f'| {len(c["unstable"])} | {c["excluded"]} |')
+                           f'| {len(c["unstable"])} | {len(c["capped"])} | {c["excluded"]} |')
+        out.append('')
+        for arm, metrics in subset['comparisons'].items():
+            for metric, c in metrics.items():
+                if c['capped']:
+                    out.append(f'Capped ({arm}, {metric}; regression of at least): ' + '; '.join(
+                        f'{x["path"]} >= {x["at_least"]:.1f}x ({x["capped"]}/{x["seeds"]} seeds)'
+                        for x in c['capped']))
         out.append('')
         # Instability spans all arms, so every comparison of a metric lists the same files.
         for metric, c in next(iter(subset['comparisons'].values()), {}).items():
