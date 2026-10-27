@@ -72,6 +72,11 @@ object SeqDistinctInverse {
     q.body match {
       case Implies(guard, Not(BuiltinEquals(SeqAt(s, i0: Var), SeqAt(s1, i1: Var))))
           if s == s1 && Set(i0, i1) == Set(v0, v1) && !s.hasSubterm(v0) && !s.hasSubterm(v1) =>
+        // Preserve instantiation from user triggers that the inverse trigger cannot replace.
+        if (!q.triggers.forall(_.p.forall {
+          case SeqAt(`s`, v: Var) => v == v0 || v == v1
+          case _ => false
+        })) return None
         val (x, y) = (i0, i1)
         def isNeq(g: Term) = g == Not(BuiltinEquals(x, y)) || g == Not(BuiltinEquals(y, x))
         val gs = conjuncts(guard)

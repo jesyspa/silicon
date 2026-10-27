@@ -1,0 +1,14 @@
+// Any copyright is dedicated to the Public Domain.
+// http://creativecommons.org/publicdomain/zero/1.0/
+
+domain D {
+  function f(i: Int): Int
+}
+
+method test(s: Seq[Bool]) {
+  inhale |s| == 3
+  inhale f(0) == 10 && f(1) == 11 && f(2) == 12
+  inhale forall i: Int, j: Int :: {f(i), f(j)}
+    0 <= i && i < |s| && 0 <= j && j < |s| && i != j ==> s[i] != s[j]
+  assert false
+}
