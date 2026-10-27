@@ -1,4 +1,4 @@
-# Silicon performance ideas ledger (2026-10-14 to 2026-10-24)
+# Silicon performance ideas ledger (2026-10-14 to 2026-10-27)
 
 Purpose: one place listing every Silicon performance idea tried or proposed in this window, with its result, so work is not repeated.
 Built from wisp transcripts, workflow-run artifacts, `~/data/viper-corpus-results/` reports and git. Most transcripts were read through final reports and targeted greps, not every step. Numbers are quoted from those sources; "derived" marks arithmetic done while writing this file.
@@ -15,11 +15,14 @@ Related term-graph cases: (a) the SMT renderer expanded the term DAG as a tree (
 - Corpus: `~/data/viper-corpus` (4,858 files; 4,009 after dropping duplicates and `_preambles`). "quick" = 250-file stratified subset. "capped full" = 1,228 files (all non-Ru2 plus 500 sampled Ru2). Baseline = 572cf2c8 unless stated.
 - Z3: pinned version is 4.16.0. Several early measurements (the 5-arm distribution run, early D/E verdicts, the "5% Silicon CPU" figure) used Z3 4.8.7 on PATH. Only the 2026-10-23 night run was warm JDK 21 / Z3 4.16.
 - Noise: pinned control-vs-control log SD 0.058 (about 6%); drift 1.1%. Many figures below are single pairs or 3-request medians.
+  - Update 2026-10-27: that figure is same-seed noise. Across Z3 seeds the median per-file |log ratio| is 0.17 on wall (files ≥ 1 s), and 14 seed-fragile files carry 45-78% of the old repeat variance (14.8). Sections 1-13 are single-seed; section 14 is seeded and paired and supersedes them where they disagree.
+- Section 14 records the 2026-10-25 to 10-27 seeded run; origin/main is now 7e42b83e.
 - Short ids: `miles`, `amadeo`, `yarrow`, `seivarden`, ... are wisp personas (`kameliya/<name>@<created>`); `sil-<name>-N` are their workers.
 
 ## 1. Landed on origin/main, with measured effect
 
 Only the first three are Silicon source changes that affect speed. None has a clean, replicated end-to-end win on Z3 4.16.
+Update 2026-10-27: E (as V3), the sequence-distinctness rewrite (flag-off) and the reborrow prototype (flag-off) have since landed; see 14.1 for the table and the measured effect of main against 572cf2c8.
 
 | Idea | Commit | Best measured effect | Isolated? |
 |---|---|---|---|
@@ -82,6 +85,7 @@ Combined effect of everything on main vs the original 572cf2c8, completed paths 
 - Why not landed: `filter_by_substring` regression; no completeness guarantee. Never measured in isolation on the full night corpus.
 
 ### 2.6 Sequence-axiom weight (`perf/seq-axioms-weight`, not landed, open decision)
+- Update 2026-10-27: settled by seeded data (14.4). W50 is speed-neutral on 250 files, removes the permutation-file seed blow-ups and speeds testTreeWand 0.68-0.78; it loses atomic.vpr 1.88, auction_token_alloc 1.49 and suite testTranspose. The pair_insertion_sort effects below are seed noise.
 - What: `@weight("50")` on `Seq_append_index3` and `Seq_drop_index2` (the reverse-direction index axioms that mint shifted index terms and drive matching loops on VerCors permutations and Gobra pair_insertion_sort).
 - Commit c4196430 (also 8226d6f4 as `night/seq-axioms-weight`). Weight 10 also tried.
 - Effect, conflicting:
@@ -96,6 +100,7 @@ Combined effect of everything on main vs the original 572cf2c8, completed paths 
 - Replay results: deleting re-assume lines -> unsat 5.9 s, 213 MB (from runaway); removing the two reverse axioms -> 5.7 s, 142 MB, all other queries identical; removing Seq_take_index's second pattern loses the proof.
 - Real builds (`loopfix-20261022/RESULTS.md`): no-reassume and oneway each fix timsort1 only; pis still OOM; combined (d21d8725, unpushed) pis 1 error at 39 s on Z3 4.8.7 but OOM on 4.16.0. Test suite (Z3 4.16): no-reassume loses 4 tests (adt example_3, silicon 0282, quantifiedpredicates triggers + MaskHeapMode); oneway loses 6 (bsearch, list_insert, example-list x2, QPWands, 0896).
 - Rejected: loses proofs, OOM not fixed.
+- Update 2026-10-27: narrow variants of both were built behind flags (14.7). Narrow no-reassume keeps the four tests the broad form lost but needs a6fb554a gated; one-round reverse axioms keep list_insert and example-list but still lose bsearch, QPWands, 0896. Neither is landed.
 
 ### 2.8 Injectivity proof portfolio (not landed; null on corpus)
 - What: when a closed unary injectivity assumption's check returns unknown (after a 10 ms probe), run fixed side-solver variants with a fresh guarded left inverse and accept only framed UNSAT. Opt-in `-Dsilicon.injectivityProofPortfolio=true`.
@@ -106,6 +111,7 @@ Combined effect of everything on main vs the original 572cf2c8, completed paths 
   - Corpus (seivarden/adelis paired quick, n=87): overall 0.999 [0.990, 1.008], no outcome changes, no group effect. Triggered on 1 of 1,198 inputs (append).
 - Correctness: with `--proverEnableTimeBounds`, testTreeWandE2 timed out at 600 s (baseline 3.139 s; outcome flip from expected assert.failed). Full suite outcomes otherwise match.
 - Why stopped: gain confined to one input; corpus flat.
+- Update 2026-10-27: linked-list-qp-append is now fixed by the narrow sequence-distinctness rewrite (14.5, landed flag-off): 139 s → 1.1 s median over 10 seeds.
 
 ### 2.9 Alias deferral (`--deferBasicAliasMerging`; not landed)
 - What: new BasicChunks merge only with syntactically identical args; prover-backed alias matching deferred to consolidation; guarded alias facts per new chunk (`eq && perms>0 ==> snaps equal`; field perm-sum <= write bound). v3 adds `BasicMergeIndex` (per-call hash index replacing linear `findChunksWithID` scans).
@@ -141,12 +147,13 @@ See section 5 (Store lookup, sharing precheck).
 - D alone, night run (Z3 4.16): speed-neutral; wireguard/initiator_main goes to timeout. 5-arm cold run: D vs C geomean wall 0.991, solver CPU 0.960 (single sample).
 - Why stopped: acceptance criteria (zero outcome changes) not met. Brancher part isolated (list_insert 6.48 s still passes); Decider part fails the list_insert gate.
 
-### 3.2 Decider: skip checks contradicted by exact path assumptions (E; `perf/stats-decider`; not landed, blocked)
+### 3.2 Decider: skip checks contradicted by exact path assumptions (E; `perf/stats-decider`; landed 2026-10-27 with the retry as V3, see 14.3)
 - What: answer "false" early when the path conditions already contain the negated goal.
 - Commits 03efa778 (`perf/stats-decider`), 09af9ab7 (`night/stats-decider`, also `wip/decider-contradiction-skip` e05ee46c).
 - Effect: only clear corpus speedup found. Night run (Z3 4.16, warm, vs three main replicates): wall geomean 0.92683 (bootstrap CI [0.88733, 0.96918], n=232), solver CPU 0.87739 [0.82910, 0.93013] (n=217); finished-by-all solver totals ~3,290 s -> 2,501 s (-24%). Outcomes main 123/109/14/4 (verified/failed/timeout/crash) vs E 124/110/12/4; three files improve (two timeouts answered, pair_insertion_sort verifies); none worse. 5-arm cold run (4.8.7): E vs D mean solver CPU 12.065 vs 13.733 s (derived ratio of means 0.88).
 - Correctness: breaks `wands/examples_paper/list_insert.vpr` in the test suite (works on main in 6.2 s). Camille's diagnosis (`269bfd69`, `list-insert-report.md`): omitted checks return unknown, removing them changes Z3 search history, an unchanged postcondition times out; restoring any one of four probes restores fast verification; reproduced as main 0, D 0, E 1 (30 s).
 - Why stopped: list_insert; history-sensitive Z3 behaviour. Not in integrated 48a8f45b. An un-fixed lead (see section 8).
+- Update 2026-10-27: fixed by the fresh-prover retry and landed as V3 (14.3). Seeded: skip alone wall 0.923 [0.892, 0.955] (n=154); V3 wall 0.957 [0.923, 0.991] (n=159), solver 0.922 [0.890, 0.954] (n=175), both biased slightly in E's favour. The "no file worse" claim does not hold: failing files near the timeout get about 1.3x slower.
 
 ### 3.3 Propositional-only fixed resource budget (in integrated 48a8f45b; default off)
 - What: internal Boolean feasibility/consistency checks whose goal is exactly True/False/Bool var under Not/And/Or/Implies get a positive budget `min(original, 1000)`; zero stays unlimited; any theory atom excludes the goal. `-Dsilicon.propositionalChecks=true`; StdIO/push-pop/default resource mode only.
@@ -201,6 +208,7 @@ See section 1. pair_insertion_sort with `memory_max_size=4000` (Z3 4.16): fix re
 - Correctness: submitted version used a narrower hash callback (`from[Any]` throws on valid widened operations) and Int sets compared asymmetrically with equal Long sets (P2). e21307b4 makes policies total; rechecked and "accepted for capped experiment". Builder loses the index on filter/diff/map/empty (fallback only).
 - Why stopped: delin rejected as submitted; amadeo-8 recommended independent design review, not landing.
 - Isolated (flag-less: single feature vs baseline); repair measured only for correctness.
+- Update 2026-10-27 (alloc stage, 14.7): no allocation or steady-state RSS change; bam JVM CPU 0.961 [0.930, 0.989], wall 0.964 [0.934, 0.991]; first-pass RSS +10%. Branch `alloc/pc` 7558acbb on 518bd9a0.
 
 ### 4.2 Global term hashing/equality collision fix (proposed only)
 - desdemona: `Second.equals` is collision-driven (97% collection ancestry). Changing global term hashing risks collection/solver ordering; not attempted. Scoped alternative is 4.1.
@@ -221,6 +229,7 @@ See section 1. pair_insertion_sort with `memory_max_size=4000` (Z3 4.16): fix re
 ## 5. Rebuilt-structure fixes (Store, sharing analysis) and the term graph
 
 ### 5.1 Store map lookup projection (`302e29e2`; in integrated 48a8f45b; not on main)
+- Update 2026-10-27: the broader control passed (14.2). Seeded, 250 files × 3 seeds: wall 0.951 [0.909, 0.993] (n=155), files ≥ 5 s 0.892 [0.822, 0.953] (n=59); no stable outcome changes; suite clean. Ready to land; `night/20261025-S` 91a4c459 applies cleanly to main 7e42b83e.
 - What: `MapBackedStore.get/getExp` rebuilt the entire term/expression map (a full projection of the store) on every single-variable lookup. Now a single underlying-map lookup. Public full projections unchanged. 51 insertions, 5 deletions.
 - Commit 302e29e2 (`investigate-real-workload`; integrated via e2263af3). Seats starling, desdemona.
 - Effect (desdemona, isolated vs main, unprofiled warm, 3 repeats per arm, Ru2 bam_load):
@@ -259,6 +268,9 @@ All Silver SHAs below are in the Silver submodule and were not verifiable in thi
 - What: reuse the immutable reserved-keyword set instead of rebuilding. Branch `frontend-reserved-names-investigation` 8c9423bb; combined with 6.1 in `frontend-combined-allocation`.
 - Effect: combined only. Allocation -0.858-0.966 GB/request on bam, -0.308 GB on refcell; wall bam +1.518/-0.161 s; refcell +0.458 s. Frontend phase wall bam -0.086/-0.311 s; refcell +0.222 s.
 - Correctness: 73 differential controls, 208 requests keep outcomes. Stopped: wall not improved; refcell regressed.
+
+### 6.2a Update 2026-10-27: 6.1 + 6.2 together, measured for non-wall value
+- jesyspa/silver `perf/frontend-allocation` bda9a9da (17 lines on b4094c37). Allocation per request 0.980 [0.977, 0.983] bam, 0.916 [0.908, 0.924] refcell, 0.966 [0.960, 0.972] Nagini; bam GC pause 0.906 [0.838, 0.989]; no latency change; suites clean (14.7). The refcell regression in 6.2 did not reproduce. Worth landing as allocation hygiene.
 
 ### 6.3 Frontend checked-input reuse / parse caching (not attempted)
 - Excluded by task contract in palli/balthazar/desdemona; worth investigating only if the real API can reuse checked inputs.
@@ -312,23 +324,28 @@ Jorah made no code changes and ran no benchmarks; it did not read the full text 
 - Measuring candidates unpaired or under shared-machine load, or on Z3 4.8.7 when 4.16 is pinned.
 - Reading `pair_insertion_sort` failed -> verified as a win when it follows Z3 memory-out restarts.
 - Spending more machine time on skip-disjoint (2.10) and alias deferral (2.9) as they stand: <=3% corpus gain, one outcome regression, suite slower.
+- Changing Z3's `eager_threshold` default to 30 or 10 (14.7): neutral on the geomean, ≥4.4x losses on some files, E10 breaks uniswap_alloc.
+- ParallelGC or a larger G1 young generation as the default (14.7); `MaxHeapFreeRatio=20` as a runner default (+49% JVM CPU on GC-heavy files).
+- The wide sequence-distinctness rewrite (testTranspose ≥3.4x) and an unbounded retry with a new seed (suite 0175 timeout) (14.3, 14.5).
+- Reading a single-seed or 2-verifier same-seed difference as an effect; reading a 3-seed outcome difference on a flip-class file as a break (initiator_main, 14.3).
+- Quoting `night.py --baseline` ratios without the position bias (14.8).
 
 ## 11. Open leads
 
-Ordered roughly by measured upside and available evidence.
+Revised 2026-10-27 from the seeded data (section 14). Ordered roughly by measured value per unit of work.
 
-1. **E (Decider contradiction skip) with the list_insert regression fixed.** Only clear corpus win: solver CPU geomean 0.877, wall 0.927 (n=232, Z3 4.16), no file worse. Blocker: list_insert history sensitivity (3.2). Fix options: keep the four probes' Z3 state effect (e.g. one retained check), or the fresh-solver retry (lead 5).
-2. **Store lookup fix (302e29e2) on its own, on the full quick set.** 2x on bam_load (64.7 -> 33.0 s; 38.7 -> 17.7 s), tests cover semantics, never run alone against the 250 files. Land candidate once a broader control passes.
-3. **Propositional budget with ablation.** secc 9x, ico 1.24-1.65x (single pairs) but not visible in the integrated night; run the ablations amadeo-11 listed (each component vs 359a230e) and find what causes the Flo list-buggy 12-16x regression in the integrated build.
-4. **Sharing precheck (e544f5f9/a696fba7) isolated.** Only measured stacked on Store (bam 23.5 -> 13.1 s, refcell 7.5 -> 8.2 s slower).
-5. **Fresh-solver retry / bounded first attempt (literature idea 1).** Offline evidence only (list_insert 0.08 s fresh vs 8 s timeout). Would make leads 1 and 3.4 (checkTimeout 2, -24% ico, -69% secc, 2 inputs) safe to try broadly.
-6. **Path-condition membership index (e21307b4)** with a converged warm measurement: equality CPU 18% -> <0.1% but wall gains inconsistent.
-7. **Permission-term DAG preservation before rendering** (5.3): rendering sharing does not help inside quantifiers; reborrows-style blowups originate in ChunkSupporter/MoreCompleteExhale.
-8. **Per-member axiom pruning census** (literature idea 2) and **reachability of dead axioms beyond proxies**; 24-37% of ico instantiations were dead-proxy; PyType exclusion axiom is 99.67% of secc instantiations (7,262,524) — inspect whether it can be guarded.
-9. **Frontend (Silver) work**: allocation proven lower (0.5-0.9 GB/request) but wall unchanged; frontend roots are 68.9% of allocation. Needs a latency-focused redesign, or checked-input reuse.
-10. **Matching-loop defence in Silicon's own axioms**: weight (2.6) needs a settled decision (night run vs loopfix disagree); a default assertTimeout or Z3 `memory_max_size` as containment (turns OOM into bounded failure; not a speedup).
-11. **Per-call cost of `BasicMergeIndex` and `PathConditions.declarations`** (4.4): never measured.
-12. **Warm-JVM profile of Silicon-internal CPU** (seivarden's suggestion; GC is 23-52% of CPU): not done; SnaKt test-suite profile also not done.
+1. **Store lookup fix (302e29e2) on main.** Seeded wall 0.951 [0.909, 0.993] (n=155), 0.892 on files ≥ 5 s; suite clean (14.2). Land; then the sharing precheck (lead 4) on top.
+2. **Fix the baseline-position bias in `night.py`** (14.8): interleave baseline seeds, or take caps from the profile. Until then keep an A/A arm in every `--baseline` night.
+3. **Turn on the sequence-distinctness rewrite by default** (14.5): fixes the worst suite lottery (linked-list-qp-append); fires in 12 of 62 checked files; corpus-neutral. Needs a default-on suite run and a decision, not more corpus time.
+4. **Sharing precheck (e544f5f9/a696fba7) isolated** on top of the Store fix. With it, bam Block--load allocation is 6.8 vs 58.8 GB per request (14.2).
+5. **Silver frontend allocation fix (bda9a9da)** via a gitlink bump (14.7).
+6. **E's remaining costs** (14.3): bound the first attempt by wall time as well as rlimit (list-buggy first attempts take 37-80 s), and decide whether failing files near the timeout may be 1.3x slower.
+7. **QP inverse-function axiom triggers** (14.7, item7): `{down(r)}` on invOfFct/fctOfInv loops on FencesDblMsgPassAcqRewrite; dropping it in a replay finishes the stalled push in 25 s. Same matcher as the aux filter.
+8. **Seq index axioms in Silicon's prelude** (14.4, 14.9): W50 (needs atomic/auction/testTranspose checks), one-round reverse axioms (needs translator-tagged index terms), narrow no-reassume (needs a6fb554a gated). The same axioms are culprits in binary_search_tree, ASSSP, ABFS, timsort1 and pair_insertion_sort.
+9. **Reborrow change** (14.6): fix the flag name and drop the unmeasured Option B, then decide default-on. Corpus 0.969 wall, outcome-safe on 1,612 runs.
+10. **Idle-runner heap** (14.8): tighten heap ratios only while a warm runner is idle; find why about 1.1 GB stays live between requests.
+11. **Propositional budget (3.3) with ablation**, PC index (4.1, CPU-only gain 3.6-3.9% on bam), `PathConditions.declarations` (4.4): unchanged from before, not run in this window.
+12. **Per-member axiom pruning census** and dead axioms beyond proxies (old lead 8); warm profile of Silicon-internal CPU (old lead 12): not run in this window.
 
 ## 13. Results of 2026-10-24 (quick corpus, warm, JDK 21, Z3 4.16 unless stated)
 
@@ -341,8 +358,100 @@ Ordered roughly by measured upside and available evidence.
 - **JDK 25 AOT cache (deployment, not code):** cache trained on 41 off-sample files; wall geomean 0.902 vs JDK 21 (noise 1.03), JVM CPU 0.797, solver 0.925; JDK 25 without cache 1.015. Gains in all size bands (0.84-0.95). Only already-unstable files changed. `~/data/viper-corpus-results/aot-quick-20261024/`.
 - **Broad profile (60-file sample, `~/data/viper-corpus-results/broad-profile-20261024/REPORT.md`):** JVM 26% / Z3 74% of CPU; 10 files hold half of wall; JIT threads 33% of JVM CPU, Silver frontend 17%, no Silicon method above 3.3% self time. Identical repeated queries 1.5-3.7% of Z3 time; empty push/pop pairs 14% of pops. `smt.arith.solver=6` and saturation off regress; pipelined prover I/O neutral.
 
+## 14. Seeded run, 2026-10-25 to 2026-10-27 (workflow run `kameliya/run-1792927685-e7215b`)
+
+Stage reports: `/opt/bots/log/workflow-runs/run-1792927685-e7215b-artifacts/.workflow-run/<stage>.md` (night1, mloop, night2-e, method, cfg, item6-item10, night3, pass4, alloc). Data under `~/data/viper-corpus-results/`: `seed-night-20261025`, `e-ablation-20261026`, `noise`, `tiers`, `fixes-20261026`, `seqDistinctInverse-20261026`, `night3-20261026`, `pass4-20261027`, `alloc-20261027`, `impact-20261027`.
+
+Method for every number below: Z3 4.16.0, warm JDK 21.0.10, `-Xmx4g`, 3 GB Z3 cap, 7G lane scopes, 300 s timeout, Z3 seeds through `smt.random_seed`/`sat.random_seed`, the same seeds per file in every arm. Per file the median over seeds; a file is unstable if max/min over seeds > 2 in an arm; ratio = geomean over stable files with a 95% bootstrap CI over files. Nights 1-2 ran Silicon's default of 2 parallel verifiers; night 3, pass4 and impact ran 1 verifier (`--numberOfParallelVerifiers 1`, `-Xss512m`), so do not compare absolute times across that boundary. Load from other accounts was 8-17 (up to 34 on non-lane CPUs) throughout.
+
+### 14.1 Landed on origin/main in this run
+
+| change | commit(s) | default | evidence |
+|---|---|---|---|
+| E as V3: skip contradicted checks + fresh-prover retry, retry seed = user seed + n, first attempt 1500 ms (rlimit 15M), retry bounded at 4x | 9a959ab9, dd279def, 58fe594b, 6ad9ba82 (= measured `perf/both-v3-bounded-retry` e2e3ee35) | on | 14.3 |
+| Sequence distinctness in inverse-function form, whole-sequence guards only | 8bc5fd04..544c0c51 (= measured bf862649) | off, `-Dsilicon.exp.seqDistinctInverse=true` | 14.5 |
+| Reborrow: take exactly `perms` when provably available | 7e42b83e (= measured f4589728, byte-identical) | off; reads `-Dsilicon.proto.minSimp=true` (see 14.10) | 14.6 |
+| Harness: noise profile, adaptive seeds, baseline caps, tiers, GC-CPU logs, per-request JVM peak RSS | a68059cb..e96fa01e | tooling | 14.8 |
+| Matching-loop analysis (`utils/scripts/matching_loops/`), per-command SMT timing | 64cc1808..b8869ecc, d47170a1 | tooling | 14.9 |
+| Suite Z3 cap (`memory_max_size=3000` in SiliconTests), `utils/scripts/suite_times.py` | aa7c2fde | tests | 14.8 |
+| Warm runners return idle heap (`-XX:G1PeriodicGCInterval=10000`), runner scopes in `silicon.slice` | 518bd9a0 | tooling | 14.8 |
+
+Main with all of the above vs the original 572cf2c8 (`impact-20261027`, T2, ≥3 seeds, 1 verifier, both experimental flags passed but the reborrow flag name was wrong, so that change was off): wall 0.850 [0.819, 0.883] (n=169), solver CPU 0.912 [0.880, 0.945] (n=172), inverted from O/N 1.176 [1.133, 1.221] and 1.096 [1.058, 1.136]. Main was the baseline, so the position bias (14.8) favours the original; the gain is if anything understated. The original also crashed on 8-14 files per seed (Z3 memory-outs before d5926d69). Suite at 7e42b83e: 1558 passed, 0 failed.
+
+### 14.2 Store lookup fix (5.1), seeded
+
+- Night 1, S = main + 302e29e2 vs M, 250 files × seeds 0-2: wall 0.951 [0.909, 0.993] (n=155); files with M ≥ 5 s 0.892 [0.822, 0.953] (n=59); stricter 3-arm stability 0.969 [0.928, 1.008] (n=141); total CPU 0.933 [0.888, 0.978] (n=148); solver CPU 0.992 [0.976, 1.008] (n=181). The gain is JVM time: Ru1 0.71, Ru2 0.73, bam_load 0.30-0.32 on every seed.
+- Outcomes: differs from M only on 4 files that already flip with the seed on M. Suite 1534 passed; the only failure is the linked-list-qp-append timeout M also shows.
+- GC pause 115.7 s vs 136.9 s per 750 runs. alloc stage: with the sharing precheck it cuts bam Block--load allocation 58.8 → 6.8 GB per request and wall 4.4x (single JVM, context only).
+- Status: verdict "ready to land"; still off main. 91a4c459 applies cleanly to 7e42b83e.
+
+### 14.3 E: ablation, V2, V3
+
+- **Ablation (night 2, 250 files × seeds 0-2, 4 arms, 2 verifiers).** Skip/M wall 0.923 [0.892, 0.955] (n=154), solver 0.913 [0.888, 0.937] (n=186). Retry/M wall 1.003 [0.972, 1.035] (n=154). Both/M wall 0.917 [0.880, 0.953] (n=156), solver 0.895 [0.860, 0.928] (n=187). The skip's gain excludes 1 on each seed separately.
+- The retry carries the outcome wins, each on 6 of 6 seeds: 0_append timeout → verified, pair_insertion_sort 4/6 → 6/6 verified, ListListQueue fails in time. Error counts are identical on all 113 failing files in every arm and seed.
+- Skip alone fails suite test list_insert (deterministic without a Z3 cap; 2 of 6 seeds hit the 3 GB cap with one). Mechanism: four `unknown` consistency probes change Z3's search state; the retry proves the goal in 0.2 s.
+- `--assertRetryTimeout` is an rlimit, not wall time: first attempts that end in a retry take 2-18 s (median 8.1 s, max 120 s). Spent first attempts cost 12-13% of the Retry arm's wall, mostly on files that time out anyway.
+- **V2** (item6, retry with a new seed, budget 1500 ms = rlimit 15M chosen from 88,654 passing first attempts: 15M cuts 7, 8M cuts 47): T0, 40 files × 10 seeds, V2/M wall 1.011 [0.987, 1.036] (n=20). list_insert passes 20/20 seeds. Lost suite test `all/issues/silver/0175.vpr` (600 s timeout; the new-seed retry was unbounded).
+- Night 3 (T2, 1 verifier, adaptive 1-8 seeds): V2/M wall 0.945 [0.903, 0.989] (n=125), solver 0.924 [0.892, 0.955] (n=171), biased (14.8). Answers 16 of M's 35 timed-out runs.
+- **V3** = V2 + retry bounded at 4x the first attempt: 0175 in 12.9 s, suite 1554/0. Pass4 C = V3 + seqDistinctInverse flag on (fires on one sub-second T2 file), T2, 876 runs per arm: wall 0.957 [0.923, 0.991] (n=159), solver 0.922 [0.890, 0.954] (n=175); all comparable files solver 0.897 [0.861, 0.933] (n=194), JVM CPU 1.019 [0.965, 1.078] (n=227). Corrected roughly for the position bias: wall about 0.98, solver about 0.95. Timeouts 35 → 19 runs (22 of M's 35 answered on 12 files), no verified run lost.
+- Costs that hold across seeds: failing files near the 300 s limit get slower. dijkstra-buggy 1.3x and times out on 2/8 seeds (M 0/8); Flo/acyclic/dll times out on 5/8 (M 1/8). Flo list-buggy: rlimit-bounded first attempts take 37-80 s wall there.
+- initiator_main: night 3 called V2's s0/s2 timeouts a break; pass4's 8 seeds give 6 verified + 2 timeouts in both C and M, on different seeds. Not a regression.
+
+### 14.4 Sequence-axiom weight (2.6), seeded
+
+- Night 1, W50 vs M, 250 files × seeds 0-2: wall 0.986 [0.954, 1.019] (n=155); M ≥ 5 s 0.959 [0.921, 0.997] (n=57). Outcome changes only on files that flip with the seed on M.
+- Permutation files: M has a 3-7x slow seed on each of the 5; W50 keeps all at 3-10 s on every seed in two independent runs. testTreeWand ×3 0.68-0.78 on every seed. W10 stabilises the permutations but does not speed up testTreeWand.
+- Losses that hold across seeds: auction_token_alloc 1.49, Ru3 atomic.vpr 1.88, suite testTranspose 1 s → 12-46 s.
+- The earlier "weight fixes pair_insertion_sort" claim was seed noise (1/3 seeds verify on W50, 1-2/3 on M).
+- Suite time: identical outside the 10 slowest tests (178-182 s, two runs per arm); the old 530 vs 419 s came from linked-list-qp-append plus load.
+- Status: recommended W50, pending atomic/auction/testTranspose checks; not re-measured since (item10's W50 run is unpaired). Not landed.
+
+### 14.5 Linked-list-qp-append and sequence distinctness
+
+- Wide rewrite (item9): linked-list-qp-append ≥35x faster (n=10 seeds, 6 off-seeds capped); T0 wall 1.014 [0.939, 1.097] (n=32); testTranspose ≥3.4x slower (2/10 seeds capped).
+- Narrow rewrite (bf862649, landed flag-off): linked-list-qp-append median 139 s → 1.1 s (10/10 seeds verify on, 9/10 off); testTranspose not rewritten, 6.1 vs 5.7 s, solver CPU equal; suite 0 outcome changes in 1672 cases. Fires in 12 of 62 checked files, none a corpus T0 performance file.
+- This is what 2.8's injectivity portfolio targeted, with a 100-line term rewrite (src/main +99/-1) instead of a side solver.
+
+### 14.6 Reborrows permission terms (lead 7, 5.3)
+
+- Night 3, RB = f4589728 with `-Dsilicon.proto.minSimp=true` vs M, 536 files (499 tagged prusti_lifetime), 2-8 seeds: tagged wall 0.969 [0.953, 0.985] (n=470), solver 0.939 [0.922, 0.956] (n=491), JVM CPU 1.006 [0.990, 1.021] (n=449). Biased by about 3 points (14.8). Outcomes identical on all 1,612 paired runs; on 17 baseline-timeout files RB answers 1 of 6.
+- On the 24-file reborrows family: 6.6x less SMT, 49% less Z3 CPU. The family gain does not carry to the corpus because most tagged files are small.
+
+### 14.7 Negative and partial results
+
+- **eager_threshold (Z3 `smt.qi.eager_threshold`, default 100 via z3config.smt2; set through `--proverConfigArgs`).** Night 3 T2: E30 wall 1.008 [0.957, 1.061] (n=126), E10 1.031 [0.990, 1.077] (n=122). T0 vs the A/A arm: E30 1.060 [1.016, 1.117] (n=41), E10 0.862 [0.701, 1.002] (n=41). Both answer timeouts (E30 13 runs on 6 files) and break others: ring-insert-sorted capped ≥4.4x (both), E10 breaks uniswap_alloc 2/2 and RelAcqRustARCStronger 1 seed, 043-pairs-sum-to-zero 4.5x. Pass4 CE/C (both non-baseline, unbiased): wall 1.011 [0.982, 1.042] (n=162). Keep 100.
+- **GC.** Night 1: pauses 0.5% of request wall, concurrent cycles 1.5%, est. GC CPU 2% of process CPU; only Ru3 mendel and 2vyper alloc files exceed 5% pause share. Night 3 + post-night check (2 files, 3-10 seeds): ParallelGC cuts JVM CPU to 0.6-0.7x on uniswap_alloc and arc_rwlock but not wall (uniswap 0.977 [0.860, 1.109]); G1NewSizePercent=40 changes nothing. `MaxHeapFreeRatio=20` costs 49% JVM CPU [44%, 55%] on uniswap_alloc. Keep default G1.
+- **Aux self-matching trigger filter** (item7, `exp/aux-self-matching-triggers` 58150119, flag-off): removes the aux loop on FencesDblMsgPassAcqRewrite (line 429) but the file still times out on 5/5 seeds both arms; suite identical. The next loop is in the QP inverse-function axioms (`{down(r)}` on invOfFct/fctOfInv); removing it in a replay finishes the stalled push in 25 s vs > 60 s. Closed without landing.
+- **No-reassume, narrow form** (item8, `exp/no-reassume-self-matching`, Consumer +38/-1, flag-off): skip re-assuming only self-matching proven foralls. pair_insertion_sort, 10 seeds: 1 verifier 1.054 [0.711, 1.621], 2 verifiers 0.683 [0.513, 0.912]; memory-outs remain. T0 (42 stable files, 3 seeds) 1.043 [1.004, 1.085] with identical SMT on 41 files: either check overhead or drift. Flag-on suite lost graph-copy ×4 to an ill-sorted substitution; fix a6fb554a is not built or suite-gated.
+- **One-round reverse Seq axioms** (item10, `exp/seq-one-round-reverse` b29eda68, flag-off): permutation file medians 2-10x lower (6 seeds, all unstable on M, so no CI); T0 wall 0.982 [0.924, 1.041] (n=32); is_happy ≥2.1x (capped seed). Loses suite bsearch, QPWands, 0896 (missing real `Seq_index` terms). FencesDblMsgPassAcqRewrite changed timeout → failed in 144-261 s although it has no Seq: unexplained, unchecked.
+- **PC membership index (4.1, e21307b4) and Silver frontend fix (6.1+6.2, jesyspa/silver bda9a9da)**, alloc stage, stream runs (bam 96 requests/arm, refcell 88, Nagini 112; hierarchical bootstrap): PC index allocation 0.999-1.005 (CIs include 1), bam JVM CPU 0.961 [0.930, 0.989], wall 0.964 [0.934, 0.991], first-pass RSS +10% [2%, 18%]. Frontend fix allocation 0.980 [0.977, 0.983] bam, 0.916 [0.908, 0.924] refcell, 0.966 [0.960, 0.972] Nagini; bam GC pause 0.906 [0.838, 0.989]; no latency change; SnaKt unaffected (it skips the macro expander). Suites clean for all arms.
+
+### 14.8 Benchmark method and harness findings
+
+- **Seeds sample fragility; with 1 verifier they also pin it.** With 2 verifiers, the same seed gave oddEven 23 vs 57 s and flipped pair_insertion_sort between runs (night 1). With 1 verifier, an A/A arm differed from M on 1 of 587 paired runs (night 3 T0), and pass4's M reproduced night 3's M outcomes exactly (415/426/35). Cross-arm outcome changes at the same seed are arm effects under 1 verifier.
+- **Noise.** Night 1: 89 of 250 files unstable on wall; median cross-seed |log ratio| on files ≥ 1 s is 0.17 wall, 0.08 solver CPU, 0.32 JVM CPU. 14 files that are seed-unstable on solver CPU carry 45-78% of the old same-seed repeat variance. Night 3: 101 of 250 files unstable in some arm; the profile under-predicts noise out of sample (quiet SD 0.08 in sample, 0.20 out).
+- **Baseline-position bias.** `night.py --baseline` runs the baseline's seeds of a file before the other arms (needed for the cap). An A/A arm (same jar) measured MM/M JVM CPU 0.855 [0.771, 0.945], wall 0.974 [0.921, 1.026], solver 0.969 [0.931, 1.006] (n=42, T0, 10-16 seeds). Every `--baseline` ratio since e96fa01e favours the non-baseline arm by roughly that. Cause unknown; contention, runner age and the heap-ratio change were ruled out. Not fixed.
+- **Caps.** A cap of 4x the slowest baseline seed cut 0 of 2,531 finished runs when taken from 3 seeds and 8 of 8,684 (0.09%, all noisy-class files) from 2 seeds. Capped runs that did occur were real regressions: ring-insert-sorted ≥4.4x, testTranspose ≥3.4x, is_happy ≥2.1x.
+- **Cost per arm.** Old method (T2, 3 seeds, 300 s everywhere): 7.0 lane-h per arm in night 1, 6.7 in night 2. New (T2, adaptive 1-8 seeds, caps): 5.35 lane-h in night 3 pass 1 (4 arms, 3,504 runs, 4.28 h on 5 lanes), 4.67 in pass4 (3 arms, 2,628 runs, 2.8 h), against 4.7 projected. T0 (44 files, ≥10 seeds): 2.65 lane-h per arm. T1 as defined saves 0.1 lane-h against T2 and was not used.
+- **Idle-runner heap.** Twenty warm runners kept about 4 GB RSS each at 518bd9a0 (about 1.1 GB live, G1 keeps about 3.6 GB committed at MaxHeapFreeRatio 70); night 3 hit 38.7 of 40 GiB. The runtime fix used that night (MaxHeapFreeRatio=20) costs 49% JVM CPU on GC-heavy files and must not become a default. Proposed: tighten the ratios only while idle via `HotSpotDiagnosticMXBean`. Not done.
+- Harness records have `errors=[]`, so error sets cannot be compared from night records; night 2 compared error counts from `stdout.log`.
+- The host's kill-orphan-builds timer kills user-systemd processes whose argv contains `/bin/z3 `; nights pass a hard link of the binary.
+
+### 14.9 Matching-loop diagnoses (mloop, item7, cfg)
+
+- `utils/scripts/matching_loops/mloop.py` reproduced every known culprit: is_happy (issubtype axioms, history-only, seed-sensitive), list-buggy (QP inverse `intf-invOfFct`), timsort1 (Seq drop/append index), pair_insertion_sort (`sorted` body fed by QP inverses and Seq take/drop).
+- 10 slowest stable-timeout files (one run each, diagnoses only): loops in 4. In binary_search_tree, ASSSP and ABFS the Seq index axioms (append_index2/3, drop_index2) are among the culprits; mergeDAG is Set_subset_def plus reachability-preamble quantifiers. dijkstra, FollyRWSpinlockStronger and the ring-insert clients are shallow mass instantiation (generation 9-34), not loops.
+- Correction: mloop called FencesDblMsgPassAcqRewrite "not a Z3 problem" because check-sats total 0.81 s. item7 found the time in Z3 processing a `push` after QP inverse axioms (a loop between `{down(r)}` triggers). cfg's per-command timing (d47170a1) now reports non-check-sat time; use it before calling a stall non-Z3.
+
+### 14.10 Open issues found in this run
+
+- 7e42b83e's message says `-Dsilicon.exp.exactReborrow=true`, but the code reads `silicon.proto.minSimp` and also contains an unmeasured Option B (`silicon.proto.permMacro`) and a "PROTOTYPE" comment. The impact run passed the documented name, so its N arm ran without the reborrow change.
+- Intermittent `StackOverflowError` in the evaluator on Ru3/mendel/assignments.vpr (night 1 W50, night 2 Skip and Retry, 10-23 night): unexplained, not arm-specific.
+- linked-list-qp-append makes suite wall time unusable (13 s to a 600 s timeout or 8 GB Z3 on main); use `suite_times.py`, or turn on the distinctness rewrite.
+
 ## 12. Source index
 
+- Section 14: stage reports in `/opt/bots/log/workflow-runs/run-1792927685-e7215b-artifacts/.workflow-run/`; data directories listed at the top of section 14.
 - Reports: `~/data/viper-corpus-results/reports/SUMMARY.md`, `reports/stage-reports/{baseline,harness,alias_reconcile,measure}.md`, `profiling-20261021/{plan.md,A/report.md,B/report.md}`, `perf-skip-futile-checks-20261021/`, `split-eval2-20261021/`, `corpus-stats-20261022/report-v2.md`, `qiprof-20261022/FINDINGS.md`, `loopfix-20261022/RESULTS.md`, (`warm-night-20261023-v2-integrated/` exists but was not read).
 - Workflow artifacts: `/opt/bots/log/workflow-runs/run-1792164539-606672 ... run-1792215341-0394f3` (yarrow, 2026-10-16/17), `run-1792519284-4f684d` (seivarden), `run-1792735761-5cfa2f` (consistency/axioms/compact-terms/list-insert seats).
 - Wisps (`kameliya/`): yarrow@2026-10-16T14:55:42Z, xochitl, seivarden, moon, rolan, matthew, adelis, miles@2026-10-21T07:38:47Z, sil-miles-1..5, sylve, hana, sil-amadeo-1..5, jorah, roic, pearl, starling, farida, saskia, desdemona, gurathin, palli, arada, delin, balthazar, camille, ista, minthara, bex. Several have no stored summary; use `instance-info show <id> --grep`.
