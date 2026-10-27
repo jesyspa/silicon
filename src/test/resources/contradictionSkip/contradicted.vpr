@@ -1,0 +1,8 @@
+// The inner branch condition is the negation of an assumed one, so its check can be skipped.
+method m(b: Bool) {
+  if (b) {
+    if (!b) {
+      assert false
+    }
+  }
+}

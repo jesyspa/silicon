@@ -133,6 +133,7 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
     private var _proverResetOptions: Map[String, String] = Map.empty
     /* The number of checks that failed without a solver call because their negation is assumed */
     private var skippedChecks: Int = 0
+    private val contradictionSkip: Boolean = AssertRetryPolicy.current.contradictionSkip
     private val _debuggerAssumedTerms: mutable.Set[Term] = mutable.Set.empty
     
     def functionDecls: Set[FunctionDecl] = _declaredFreshFunctions
@@ -399,7 +400,7 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
         case Not(a) => a
         case _ => Not(t)
       }
-      if (pcs.assumptions contains negated) {
+      if (contradictionSkip && pcs.assumptions.contains(negated)) {
         skippedChecks += 1
         false
       } else {

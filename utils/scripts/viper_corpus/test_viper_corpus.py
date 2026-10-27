@@ -112,6 +112,17 @@ class CorpusTests(unittest.TestCase):
         self.assertEqual(run.outcome(dict(base, returncode=1), 'Exception'), 'crash')
         self.assertEqual(run.outcome({}, ''), 'crash')
 
+    def test_retry_stats_sum_retries_and_skips(self):
+        log = ('Prover 01 retried an assertion in a fresh prover: first attempt 5685 ms, '
+               'restart and replay 127 ms, retry 379 ms, answer unsat\n'
+               'Prover 02 retried an assertion in a fresh prover: first attempt 2000 ms, '
+               'restart and replay 45 ms, retry 6000 ms, answer unknown\n'
+               'Decider 01 skipped 2 contradicted checks\nDecider 02 skipped 3 contradicted checks\n')
+        self.assertEqual(run.retry_stats(log), dict(
+            retries=2, retries_unsat=1, retry_first_ms=7685, retry_restart_ms=172, retry_ms=6379,
+            skipped_checks=5))
+        self.assertEqual(run.retry_stats('verified')['retries'], 0)
+
     def args(self):
         manifest, rows = self.manifest()
         binary = self.root / 'binary'
@@ -159,7 +170,9 @@ class CorpusTests(unittest.TestCase):
             (out / 'measurement.json').write_text(json.dumps(dict(
                 returncode=0, success=True, errors=[], solver_cpu_s=dict(usage=1.25),
                 total_process_cpu_s=2.5, elapsed_s=3.75)))
-            (out / 'stdout.log').write_text('verified')
+            (out / 'stdout.log').write_text(
+                'Prover 01 retried an assertion in a fresh prover: first attempt 10 ms, '
+                'restart and replay 20 ms, retry 30 ms, answer unsat\nverified')
             return subprocess.CompletedProcess(command, 0, stderr=b'')
 
         with patch.object(run.subprocess, 'run', side_effect=invoke):
@@ -168,6 +181,7 @@ class CorpusTests(unittest.TestCase):
         self.assertEqual(result['solver_cpu_s'], 1.25)
         self.assertEqual(result['total_process_cpu_s'], 2.5)
         self.assertEqual(result['wall_s'], 3.75)
+        self.assertEqual((result['retries'], result['retry_restart_ms']), (1, 20))
         self.assertTrue((args.output_directory / result['measurement']).is_file())
 
     def test_missing_measurement_is_crash(self):
@@ -205,7 +219,9 @@ for line in sys.stdin:
         kills = int(open(events).read().split()[-1]) + 1
         open(events, 'w').write(f'oom {kills}\\noom_kill {kills}\\n')
         if name == 'z3oom-hang.vpr': time.sleep(60)
-    open(log, 'w').write('Silicon found 1 error' if name == 'bad.vpr' else 'ok')
+    open(log, 'w').write('Silicon found 1 error' if name == 'bad.vpr' else
+                         'Prover 01 retried an assertion in a fresh prover: first attempt 1 ms, '
+                         'restart and replay 2 ms, retry 3 ms, answer unsat\\nok')
     print(json.dumps(dict(success=name == 'a.vpr', wall_s=0.5, jvm_cpu_ticks=200,
                           children_cpu_ticks=100, heap_after_gc_bytes=7,
                           gc={'G1 Young Generation': dict(count=2, ms=250),
@@ -242,6 +258,8 @@ for line in sys.stdin:
         self.assertEqual(results[0]['solver_cpu_s'], 100 / tick)
         self.assertEqual(results[0]['total_process_cpu_s'], 300 / tick)
         self.assertIsNone(results[2]['wall_s'])
+        self.assertEqual((results[0]['retries'], results[0]['retry_restart_ms']), (1, 2))
+        self.assertEqual(results[1]['retries'], 0)
         self.assertEqual(results[0]['gc_s'], 0.25)
         self.assertEqual(results[0]['gc']['G1 Concurrent GC'], dict(count=1, ms=900))
         self.assertIsNone(results[2]['gc_s'])

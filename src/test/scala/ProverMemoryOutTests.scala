@@ -9,7 +9,7 @@ package viper.silicon.tests
 import java.io.PrintWriter
 import org.scalatest.funsuite.AnyFunSuite
 import viper.silicon.Silicon
-import viper.silicon.decider.{TermToSMTLib2Converter, Z3ProverStdIO}
+import viper.silicon.decider.{AssertRetryPolicy, ProverStdIO, TermToSMTLib2Converter, Z3ProverStdIO}
 import viper.silicon.interfaces.SiliconFailureContext
 import viper.silicon.state.DefaultIdentifierFactory
 import viper.silver.ast.HasLineColumn
@@ -48,14 +48,19 @@ class ProverMemoryOutTests extends AnyFunSuite {
   /* A Z3 prover that answers the commands in [[failOn]] with a memory-out, and the commands in [[replace]]
    * with the given answers, after processing them
    */
-  private class FailingProver extends Z3ProverStdIO("memoryOut", new TermToSMTLib2Converter,
+  private class FailingProver(policy: AssertRetryPolicy = AssertRetryPolicy(true, true, true))
+    extends Z3ProverStdIO("memoryOut", new TermToSMTLib2Converter,
                                                     new DefaultIdentifierFactory("memoryOut"), NoopReporter) {
     var failOn: List[String] = Nil
     var replace: List[(String, String)] = Nil
     var starts = 0
     /* The command-line arguments of each prover process */
     var startArgs: List[Option[String]] = Nil
+    /* The commands sent to the prover, including replays */
+    var sent: Vector[String] = Vector.empty
     private var lastSent: String = _
+
+    override protected val retryPolicy: AssertRetryPolicy = policy
 
     def retryArgsFor(args: Option[String], retry: Int): Option[String] = retryArgs(args, retry)
 
@@ -68,7 +73,7 @@ class ProverMemoryOutTests extends AnyFunSuite {
       starts += 1
       super.connectToProver()
       output = new PrintWriter(output, true) {
-        override def println(line: String): Unit = { lastSent = line; super.println(line) }
+        override def println(line: String): Unit = { lastSent = line; sent :+= line; super.println(line) }
       }
     }
 
@@ -87,11 +92,13 @@ class ProverMemoryOutTests extends AnyFunSuite {
     }
   }
 
-  private def withProver(body: FailingProver => Unit): Unit = {
+  private def withProver(body: FailingProver => Unit): Unit = withProver(new FailingProver)(body)
+
+  private def withProver(newProver: => FailingProver)(body: FailingProver => Unit): Unit = {
     val backend = new Silicon(List("startedBy" -> s"Unit test ${this.getClass.getSimpleName}"))
     backend.parseCommandLine(List("--numberOfParallelVerifiers", "1", "dummy.sil"))
     backend.start()
-    val prover = new FailingProver
+    val prover = newProver
     prover.start()
     /* Part of the preamble that Silicon would otherwise emit */
     prover.emit("(set-option :print-success true)")
@@ -171,6 +178,62 @@ class ProverMemoryOutTests extends AnyFunSuite {
       assert(!prover.assert("(> x 0)", None))
       assert(prover.starts == 2)
     }
+  }
+
+  private def retryTimingOut(prover: FailingProver): Unit = {
+    prover.emit("(declare-const x Int)")
+    prover.assume("(> x 1)")
+    prover.replace = List(
+      "(check-sat)" -> "unknown",
+      "(get-info :reason-unknown)" -> "(:reason-unknown \"max. resource limit exceeded\")")
+    prover.sent = Vector.empty
+    assert(prover.assert("(> x 0)", None))
+    assert(prover.starts == 2)
+  }
+
+  /* The resource limit in effect at each check-sat */
+  private def retryRlimits(prover: FailingProver): Seq[Long] =
+    prover.sent.foldLeft((Option.empty[Long], Vector.empty[Long])) {
+      case ((_, checks), cmd) if cmd.startsWith("(set-option :rlimit ") =>
+        (Some(cmd.stripPrefix("(set-option :rlimit ").stripSuffix(")").toLong), checks)
+      case ((limit, checks), "(check-sat)") => (limit, checks :+ limit.get)
+      case (state, _) => state
+    }._2
+
+  test("A retry is bounded at a multiple of the first attempt's timeout by default") {
+    withProver { prover =>
+      retryTimingOut(prover)
+      val limits = retryRlimits(prover)
+      assert(limits.length == 2 && limits(0) > 0 && limits(1) == limits(0) * ProverStdIO.RetryTimeoutFactor)
+    }
+  }
+
+  test("-Dsilicon.exp.retryFinal=unbounded retries without a timeout") {
+    withProver(new FailingProver(AssertRetryPolicy(newSeed = true, boundedFinal = false, contradictionSkip = true))) { prover =>
+      retryTimingOut(prover)
+      val limits = retryRlimits(prover)
+      assert(limits.length == 2 && limits(0) > 0 && limits(1) == 0)
+    }
+  }
+
+  test("-Dsilicon.exp.retrySeed=same retries with the arguments of the first attempt") {
+    withProver(new FailingProver(AssertRetryPolicy(newSeed = false, boundedFinal = true, contradictionSkip = true))) { prover =>
+      retryTimingOut(prover)
+      assert(prover.startArgs == List(None, None))
+    }
+  }
+
+  test("The experimental retry switches are read from system properties") {
+    def policy(settings: (String, String)*): AssertRetryPolicy = {
+      val properties = new java.util.Properties
+      settings.foreach { case (k, v) => properties.setProperty(k, v) }
+      AssertRetryPolicy.fromProperties(properties)
+    }
+    assert(policy() == AssertRetryPolicy(newSeed = true, boundedFinal = true, contradictionSkip = true))
+    assert(policy("silicon.exp.retrySeed" -> "same", "silicon.exp.retryFinal" -> "unbounded",
+                  "silicon.exp.contradictionSkip" -> "false") ==
+      AssertRetryPolicy(newSeed = false, boundedFinal = false, contradictionSkip = false))
+    assert(policy("silicon.exp.retrySeed" -> "new", "silicon.exp.retryFinal" -> "bounded") == policy())
   }
 
   test("A retry seed differs from the seed of the first attempt") {

@@ -85,6 +85,26 @@ def outcome(measurement, log):
     return 'crash'
 
 
+RETRY = re.compile(r'retried an assertion in a fresh prover: first attempt (\d+) ms, '
+                   r'restart and replay (\d+) ms, retry (\d+) ms, answer (\S+)')
+SKIPPED = re.compile(r'skipped (\d+) contradicted checks')
+
+
+def retry_stats(log):
+    """Fresh-prover retries and contradiction skips reported in a Silicon log.
+
+    Each retry line gives its spent first attempt, restart+replay and retry times;
+    answer_unsat counts retries that proved the assertion.
+    """
+    retries = [m.groups() for m in RETRY.finditer(log)]
+    return dict(retries=len(retries),
+                retries_unsat=sum(answer == 'unsat' for *_, answer in retries),
+                retry_first_ms=sum(int(first) for first, *_ in retries),
+                retry_restart_ms=sum(int(restart) for _, restart, *_ in retries),
+                retry_ms=sum(int(retry) for _, _, retry, _ in retries),
+                skipped_checks=sum(int(m.group(1)) for m in SKIPPED.finditer(log)))
+
+
 SEED_PARAMETERS = ('smt.random_seed', 'sat.random_seed')
 
 
@@ -148,7 +168,8 @@ def run_one(row, args):
                 returncode=measurement.get('returncode'),
                 measurement=str(relative / 'measurement.json'),
                 errors=measurement.get('errors', []) + (
-                    [completed.stderr.decode(errors='replace')] if not measurement else []))
+                    [completed.stderr.decode(errors='replace')] if not measurement else []),
+                **retry_stats(log))
 
 
 RUNNER = Path(__file__).with_name('WarmRunner.java')
@@ -407,7 +428,7 @@ def run_warm_once(row, args, lane):
                       returncode=0 if response['success'] else 1, success=response['success']), log),
                   wall_s=None, solver_cpu_s=None, total_process_cpu_s=None, jvm_cpu_s=None,
                   heap_after_gc_bytes=None, gc=None, gc_s=None, seed=getattr(args, 'seed', None),
-                  measurement=str(relative / 'measurement.json'), **context)
+                  measurement=str(relative / 'measurement.json'), **context, **retry_stats(log))
     if response:
         result.update(wall_s=response['wall_s'], solver_cpu_s=response['children_cpu_ticks'] / tick,
                       jvm_cpu_s=response['jvm_cpu_ticks'] / tick,

@@ -44,6 +44,7 @@ abstract class ProverStdIO(uniqueId: String,
   protected var processArgs: Option[String] = None
   /* The number of assertions retried in a fresh prover since the prover was started */
   protected var retries: Int = 0
+  protected val retryPolicy: AssertRetryPolicy = AssertRetryPolicy.current
   /* The commands that make up the prover's current state, one buffer per push-pop scope, such that
    * the state can be rebuilt after a prover restart. See [[restartAfterMemoryOut]].
    */
@@ -314,7 +315,8 @@ abstract class ProverStdIO(uniqueId: String,
         /* Z3's search depends on the queries that preceded it in the same prover and on its random seed.
          * An assertion that it does not prove quickly is retried in a fresh prover with the same
          * state and a different seed, with a timeout of RetryTimeoutFactor times that of the first attempt. If the
-         * retry reaches that timeout, the assertion fails.
+         * retry reaches that timeout, the assertion fails. [[AssertRetryPolicy]] can keep the seed or drop the
+         * retry's timeout.
          */
         isRetryableAttempt = true
         val (firstResult, firstDuration) =
@@ -324,11 +326,12 @@ abstract class ProverStdIO(uniqueId: String,
         } else {
           comment(s"Retrying the assertion in a fresh prover")
           retries += 1
-          processArgs = retryArgs(userArgs, retries)
+          processArgs = if (retryPolicy.newSeed) retryArgs(userArgs, retries) else userArgs
           val restartStart = System.currentTimeMillis()
           restartAndReplay()
           val restartDuration = System.currentTimeMillis() - restartStart
-          val (retryResult, retryDuration) = assertInMode(goal, Some(retryTimeout * ProverStdIO.RetryTimeoutFactor))
+          val retryBound = if (retryPolicy.boundedFinal) Some(retryTimeout * ProverStdIO.RetryTimeoutFactor) else None
+          val (retryResult, retryDuration) = assertInMode(goal, retryBound)
           val answer = if (lastCheckRanOutOfMemory) "out of memory" else lastCheckSatAnswer
           val msg = (s"Prover $uniqueId retried an assertion in a fresh prover: first attempt $firstDuration ms, "
                      + s"restart and replay $restartDuration ms, retry $retryDuration ms, answer $answer")
