@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Locale;
 
 import ch.qos.logback.classic.Logger;
+import com.sun.management.HotSpotDiagnosticMXBean;
 import scala.Option;
 import scala.collection.immutable.ArraySeq;
 import viper.silicon.SiliconFrontend;
@@ -50,6 +51,12 @@ public final class WarmRunner {
         System.setErr(redirected);
         // One logger for all requests: each ViperLogger construction adds another appender.
         Logger logger = ViperStdOutLogger.apply("SiliconFrontend", "INFO").get();
+        HotSpotDiagnosticMXBean hotspot = ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean.class);
+        // Committed heap above which the post-request collection returns free heap, in MiB;
+        // 0 disables it. Regrowing a small heap costs short inputs up to a third of their time.
+        long shrinkAbove = Long.getLong("warmrunner.idleShrinkAboveMiB", 1024) << 20;
+        String minFree = hotspot.getVMOption("MinHeapFreeRatio").getValue();
+        String maxFree = hotspot.getVMOption("MaxHeapFreeRatio").getValue();
         BufferedReader requests = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
         protocol.println("{\"ready\":true}");
         for (String line; (line = requests.readLine()) != null; ) {
@@ -82,7 +89,19 @@ public final class WarmRunner {
             double wall = (System.nanoTime() - start) / 1e9;
             long[] after = procStat();
             long[][] gcAfter = gcStat();
+            // An idle runner otherwise keeps up to MaxHeapFreeRatio of free heap committed.
+            // Tight ratios slow GC-heavy inputs, so they hold only for this collection.
+            boolean shrink = shrinkAbove > 0
+                && ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getCommitted() > shrinkAbove;
+            if (shrink) {
+                hotspot.setVMOption("MinHeapFreeRatio", "10");
+                hotspot.setVMOption("MaxHeapFreeRatio", "20");
+            }
             System.gc();
+            if (shrink) {
+                hotspot.setVMOption("MaxHeapFreeRatio", maxFree);
+                hotspot.setVMOption("MinHeapFreeRatio", minFree);
+            }
             long heap = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getUsed();
             protocol.println(String.format(Locale.ROOT,
                 "{\"success\":%b,\"wall_s\":%.6f,\"jvm_cpu_ticks\":%d,\"children_cpu_ticks\":%d,"

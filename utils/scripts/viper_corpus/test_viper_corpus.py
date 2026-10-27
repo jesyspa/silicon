@@ -722,6 +722,40 @@ for line in sys.stdin:
         c = analyze.compare(files, 'M', 'W', 'wall_s', 2.0, 50, analyze.random.Random(0))
         self.assertEqual(([x['at_least'] for x in c['capped']], c['excluded']), ([1.2], 1))
 
+    def test_night_profile_caps_every_arm_without_baseline_first_and_primes(self):
+        self.assertEqual(night.profile_cap({'median_wall_s': 20}, 4, 30, 300), 80)
+        self.assertEqual(night.profile_cap({'median_wall_s': 2}, 4, 30, 300), 30)
+        self.assertEqual(night.profile_cap({'median_wall_s': None}, 4, 30, 300), 300)
+        self.assertEqual(night.profile_cap({}, 4, 30, 300), 300)
+        rows = run.read_jsonl(self.manifest()[0])
+        profile = self.root / 'profile.json'
+        profile.write_text(json.dumps(dict(files={rows[0]['path']: {'class': 'mid',
+                                                                    'median_wall_s': 12}})))
+        args, arms = self.night_args(rows, seeds=None, profile=profile, cap_from='profile',
+                                     prime_below=60, seed_policy=night.parse_policy(''))
+        seen = []
+
+        def measure(row, task, lane):
+            seen.append((lane.label[0], task.seed, task.timeout))
+            return dict(outcome='timeout' if lane.label[0] == 'M' else 'verified',
+                        wall_s=task.timeout + 1, seed=task.seed)
+
+        with patch.object(run, 'build_runner', return_value=args.java), \
+                patch.object(run, 'run_warm_once', side_effect=measure):
+            night.execute(args, arms, [rows])
+        # One unrecorded priming run per runner, on its first seed, then three seeds;
+        # both arms are capped at 48 s.
+        for a in 'MW':
+            mine = [(s, t) for arm, s, t in seen if arm == a]
+            self.assertEqual((mine[0], sorted(set(mine))), (mine[1], [(s, 48) for s in range(3)]))
+            self.assertEqual(len(mine), 4)
+        records = run.read_jsonl(args.output_directory / 'results.jsonl')
+        self.assertEqual({(r['arm'], r['outcome']) for r in records}, {('M', 'capped'), ('W', 'verified')})
+        self.assertEqual(json.loads((args.output_directory / 'run.json').read_text())['cap_from'],
+                         'profile')
+        tasks = night.plan([[dict(path=f'f{i}') for i in range(20)]], ['M', 'W'], [0, 1], 0)
+        self.assertNotEqual({t[1] for t in tasks[0::4]}, {'M'})  # no arm leads every file
+
     def test_night_profile_seeds_are_snapshotted_and_shared_by_arms(self):
         rows = run.read_jsonl(self.manifest()[0])
         profile = self.root / 'profile.json'

@@ -10,11 +10,16 @@ memory-limited scope. Results: <output>/results.jsonl, one record per
 after the running tasks.
 
 With --profile (from noise.py), each file gets seeds 0..k-1, with k from its
-noise class, the same for every arm. With --baseline, the baseline runs a file
-first; if it finishes every seed, the other arms run that file with a timeout
-of --cap-factor times its slowest baseline run, and a run cut by that timeout
-is recorded as capped: a regression of at least the cap ratio. With
---extend-width, a file gets one more seed while the 95% t-interval of any
+noise class, the same for every arm. With --baseline, runs get a timeout of
+--cap-factor times a reference time, and a run cut by that timeout is recorded
+as capped. With --cap-from profile (the default with --profile), the reference
+is the file's profiled median wall, every arm is capped alike, and all arms'
+runs of a file are shuffled together. With --cap-from baseline, the baseline
+runs a file first and the reference is its slowest run, so only the other arms
+are capped; this ordering makes the baseline measurably slower than the same
+JAR in another arm. With --prime-below, a runner verifies a file once,
+unrecorded, before its first timed run of that file, when the file's profiled
+median wall is below that many seconds. With --extend-width, a file gets one more seed while the 95% t-interval of any
 arm's per-seed paired log ratio is wider than that, up to --max-seeds.
 """
 import argparse
@@ -102,7 +107,8 @@ def seed_count(entry, policy, targeted=False):
 def plan(manifests, arms, seeds, order_seed, baseline=None):
     """Tasks (row, arm, seed): manifests in order, files shuffled within each, then arm x seed.
 
-    seeds is a list, or a function of the row. The baseline's tasks of a file come first.
+    seeds is a list, or a function of the row. The baseline's tasks of a file come first,
+    or with no baseline, all tasks of a file are shuffled together.
     """
     rng = random.Random(order_seed)
     seen, tasks = set(), []
@@ -131,6 +137,12 @@ def cap(records, baseline, factor, low, high):
     return min(high, max(low, math.ceil(factor * max(r['wall_s'] for r in base))))
 
 
+def profile_cap(entry, factor, low, high):
+    """Timeout of every arm from the file's profile entry, or high when it has no median."""
+    median = entry.get('median_wall_s')
+    return high if not median else min(high, max(low, math.ceil(factor * median)))
+
+
 def wide(records, arms, baseline, seeds, width):
     """Whether any arm's 95% t-interval of per-seed log(arm / baseline) is wider than width."""
     if len(seeds) < 2:
@@ -152,16 +164,18 @@ def wide(records, arms, baseline, seeds, width):
 class Schedule:
     """Pending tasks in plan order, handed to lanes once ready.
 
-    A non-baseline task waits until the baseline's planned tasks of its file are
-    done, because their results set its timeout. Extra seeds join the front.
+    With lead set, a non-baseline task waits until the baseline's planned tasks of
+    its file are done, because their results set its timeout. The baseline is the
+    reference of --extend-width either way. Extra seeds join the front.
     """
 
-    def __init__(self, tasks, records, arms, baseline=None, extend=None, rng=None):
+    def __init__(self, tasks, records, arms, baseline=None, extend=None, rng=None, lead=True):
         self.condition = threading.Condition()
         self.records = {}  # path -> {(arm, seed): record}
         for r in records:
             self.records.setdefault(r['path'], {})[r['arm'], r['seed']] = r
         self.arms, self.baseline, self.extend, self.rng = arms, baseline, extend, rng
+        self.lead = baseline if lead else None
         self.rows, self.seeds, self.open = {}, {}, {}
         self.pending, self.running = [], 0
         for row, arm, seed in tasks:
@@ -174,7 +188,7 @@ class Schedule:
 
     def add(self, row, arm, seed, at=None):
         self.pending.insert(len(self.pending) if at is None else at, (row, arm, seed))
-        if arm == self.baseline:
+        if arm == self.lead:
             self.open[row['path']] = self.open.get(row['path'], 0) + 1
 
     def grow(self, path):
@@ -191,7 +205,7 @@ class Schedule:
                 return
             self.seeds[path].add(seeds[-1] + 1)
             missing = [t for t in block(self.rows[path], self.arms, [seeds[-1] + 1], self.rng,
-                                        self.baseline) if (t[1], t[2]) not in records]
+                                        self.lead) if (t[1], t[2]) not in records]
             for index, task in enumerate(missing):
                 self.add(*task, at=index)
 
@@ -199,7 +213,7 @@ class Schedule:
         """(task, finished): a ready task or None; finished once nothing remains."""
         with self.condition:
             for index, (row, arm, seed) in enumerate(self.pending):
-                if arm == self.baseline or not self.open.get(row['path']):
+                if arm == self.lead or not self.open.get(row['path']):
                     self.running += 1
                     return self.pending.pop(index), False
             if not self.pending and not self.running:
@@ -208,7 +222,7 @@ class Schedule:
             return None, False
 
     def timeout(self, row, arm, factor, low, high):
-        if self.baseline is None or arm == self.baseline or not factor:
+        if self.lead is None or arm == self.lead or not factor:
             return high
         with self.condition:
             return cap(self.records.get(row['path'], {}), self.baseline, factor, low, high)
@@ -218,7 +232,7 @@ class Schedule:
         with self.condition:
             self.running -= 1
             self.records.setdefault(row['path'], {})[arm, seed] = record
-            if arm == self.baseline:
+            if arm == self.lead:
                 self.open[row['path']] -= 1
             self.grow(row['path'])
             self.condition.notify_all()
@@ -243,9 +257,10 @@ class NightLane(run.Lane):
 
     def __init__(self, *args, warmup=(), **kwargs):
         super().__init__(*args, **kwargs)
-        self.warmup = warmup
+        self.warmup, self.primed = warmup, set()
 
     def start(self):
+        self.primed = set()  # inputs verified unrecorded since this start
         for attempt in range(2):
             try:
                 super().start()
@@ -287,6 +302,10 @@ def execute(args, arms, manifests):
         if getattr(args, 'baseline', None):
             extra.update(baseline=args.baseline, cap_factor=args.cap_factor, cap_min=args.cap_min,
                          extend=[args.extend_width, args.max_seeds] if args.extend_width else None)
+            if getattr(args, 'cap_from', None) == 'profile':  # absent from run.json files that predate it
+                extra.update(cap_from='profile')
+        if getattr(args, 'prime_below', None):
+            extra.update(prime_below=args.prime_below)
         config = dict(schema=1, mode='night', corpus_root=str(args.corpus_root), **extra,
                       manifests=[sha256(m) for m in args.manifest], seeds=args.seeds,
                       order_seed=args.order_seed, timeout=args.timeout,
@@ -319,17 +338,19 @@ def execute(args, arms, manifests):
                 raise ValueError('duplicate result: ' + ' '.join(map(str, key)))
             done.add(key)
         by_name = {a['name']: a for a in arms}
-        seeds = args.seeds
+        seeds, files = args.seeds, {}
         if getattr(args, 'profile', None):
             files = json.loads(profile.read_text())['files']
             targeted = {r['path'] for m in args.targeted for r in run.read_jsonl(m)}
             seeds = lambda row: list(range(seed_count(files.get(row['path'], {}), args.seed_policy,
                                                       row['path'] in targeted)))
         baseline = getattr(args, 'baseline', None)
+        by_profile = baseline is not None and getattr(args, 'cap_from', 'baseline') == 'profile'
         extend = baseline and args.extend_width and (args.extend_width, args.max_seeds)
-        tasks = Schedule(plan(manifests, list(by_name), seeds, args.order_seed, baseline),
+        tasks = Schedule(plan(manifests, list(by_name), seeds, args.order_seed,
+                              None if by_profile else baseline),
                          run.read_jsonl(results), list(by_name), baseline, extend,
-                         random.Random(args.order_seed + 1))
+                         random.Random(args.order_seed + 1), lead=not by_profile)
         if not len(tasks):
             return
         (args.output_directory / 'gc').mkdir(exist_ok=True)
@@ -369,11 +390,21 @@ def execute(args, arms, manifests):
                         continue
                     row, name, seed = item
                     arm = by_name[name]
-                    limit = tasks.timeout(row, name, getattr(args, 'cap_factor', None),
-                                          getattr(args, 'cap_min', None), args.timeout)
+                    if by_profile:
+                        limit = profile_cap(files.get(row['path'], {}), args.cap_factor,
+                                            args.cap_min, args.timeout)
+                    else:
+                        limit = tasks.timeout(row, name, getattr(args, 'cap_factor', None),
+                                              getattr(args, 'cap_min', None), args.timeout)
                     task = SimpleNamespace(**dict(vars(args), seed=seed, timeout=limit, verifier_arg=[
                         *args.verifier_arg, *arm['verifier_arg']]))
                     try:
+                        prime = getattr(args, 'prime_below', None)
+                        if (prime and row['path'] not in lanes[name].primed and
+                                (files.get(row['path'], {}).get('median_wall_s') or math.inf) < prime):
+                            # The first run of an input in a runner pays its JIT warm-up.
+                            run.run_warm_once(row, task, lanes[name])
+                            lanes[name].primed.add(row['path'])
                         record = dict(**row, **run.run_warm_once(row, task, lanes[name]),
                                       arm=name, cpus=cpus, returncode=None, errors=[],
                                       timeout_s=limit)
@@ -433,14 +464,21 @@ def main(argv=None):
     parser.add_argument('--targeted', type=Path, action='append', default=[],
                         help='manifest of files the change targets: always-timeout files among '
                              'them get the targeted seed count instead of 1')
-    parser.add_argument('--baseline', help='arm run first; caps the timeouts of the others')
+    parser.add_argument('--baseline', help='reference arm: enables caps and --extend-width')
+    parser.add_argument('--cap-from', choices=('profile', 'baseline'),
+                        help="with --baseline: cap reference, the profiled median wall of every "
+                             "arm's runs, or the slowest baseline run of the others' runs; "
+                             "default profile with --profile, else baseline")
     parser.add_argument('--cap-factor', type=float, default=4.0,
-                        help='with --baseline: other arms get this times the slowest baseline run')
+                        help='with --baseline: the cap is this times the reference time')
     parser.add_argument('--cap-min', type=int, default=30, help='lowest capped timeout in seconds')
     parser.add_argument('--extend-width', type=float,
                         help='with --baseline and --profile: add seeds while the paired log-ratio '
                              '95%% interval half-width exceeds this')
     parser.add_argument('--max-seeds', type=int, default=10, help='seed limit of --extend-width')
+    parser.add_argument('--prime-below', type=float,
+                        help='with --profile: prime each runner on files with a lower profiled '
+                             'median wall in seconds')
     parser.add_argument('--lanes', default='2,10;3,11;6,14;7,15;5,13',
                         help='semicolon-separated CPU sets')
     parser.add_argument('--java', type=Path, required=True)
@@ -478,6 +516,11 @@ def main(argv=None):
         parser.error('--baseline must name an arm')
     if args.extend_width and not (args.baseline and args.profile):
         parser.error('--extend-width needs --baseline and --profile')
+    args.cap_from = args.cap_from or ('profile' if args.profile else 'baseline')
+    if args.cap_from == 'profile' and not args.profile:
+        parser.error('--cap-from profile needs --profile')
+    if args.prime_below and not args.profile:
+        parser.error('--prime-below needs --profile')
     if args.cap_factor <= 0 or args.cap_min <= 0 or args.max_seeds <= 0:
         parser.error('cap factor, cap minimum and seed limit must be positive')
     # Warm-runner defaults go to each arm unless its arguments, global or own, set them.
