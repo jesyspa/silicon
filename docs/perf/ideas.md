@@ -336,7 +336,7 @@ Revised 2026-10-27 from the seeded data (section 14). Ordered roughly by measure
 
 1. **Store lookup fix (302e29e2) on main.** Seeded wall 0.951 [0.909, 0.993] (n=155), 0.892 on files ≥ 5 s; suite clean (14.2). Land; then the sharing precheck (lead 4) on top.
 2. **Fix the baseline-position bias in `night.py`** (14.8): interleave baseline seeds, or take caps from the profile. Until then keep an A/A arm in every `--baseline` night.
-3. **Turn on the sequence-distinctness rewrite by default** (14.5): fixes the worst suite lottery (linked-list-qp-append); fires in 12 of 62 checked files; corpus-neutral. Needs a default-on suite run and a decision, not more corpus time.
+3. **Done 2026-10-27: the sequence-distinctness rewrite is on by default** (14.5): fixes the worst suite lottery (linked-list-qp-append); fires in 12 of 62 checked files; corpus-neutral. Needs a default-on suite run and a decision, not more corpus time.
 4. **Sharing precheck (e544f5f9/a696fba7) isolated** on top of the Store fix. With it, bam Block--load allocation is 6.8 vs 58.8 GB per request (14.2).
 5. **Silver frontend allocation fix (bda9a9da)** via a gitlink bump (14.7).
 6. **E's remaining costs** (14.3): bound the first attempt by wall time as well as rlimit (list-buggy first attempts take 37-80 s), and decide whether failing files near the timeout may be 1.3x slower.
@@ -369,7 +369,7 @@ Method for every number below: Z3 4.16.0, warm JDK 21.0.10, `-Xmx4g`, 3 GB Z3 ca
 | change | commit(s) | default | evidence |
 |---|---|---|---|
 | E as V3: skip contradicted checks + fresh-prover retry, retry seed = user seed + n, first attempt 1500 ms (rlimit 15M), retry bounded at 4x | 9a959ab9, dd279def, 58fe594b, 6ad9ba82 (= measured `perf/both-v3-bounded-retry` e2e3ee35) | on | 14.3 |
-| Sequence distinctness in inverse-function form, whole-sequence guards only | 8bc5fd04..544c0c51 (= measured bf862649) | off, `-Dsilicon.exp.seqDistinctInverse=true` | 14.5 |
+| Sequence distinctness in inverse-function form, whole-sequence guards only | 8bc5fd04..544c0c51 (= measured bf862649) | on since 2026-10-27 (default-on suite 1560/0); off with `-Dsilicon.exp.seqDistinctInverse=false` | 14.5 |
 | Reborrow: take exactly `perms` when provably available | 7e42b83e (= measured f4589728, byte-identical) | off; reads `-Dsilicon.proto.minSimp=true` (see 14.10) | 14.6 |
 | Harness: noise profile, adaptive seeds, baseline caps, tiers, GC-CPU logs, per-request JVM peak RSS | a68059cb..e96fa01e | tooling | 14.8 |
 | Matching-loop analysis (`utils/scripts/matching_loops/`), per-command SMT timing | 64cc1808..b8869ecc, d47170a1 | tooling | 14.9 |

@@ -8,7 +8,7 @@ package viper.silicon.decider
 
 import viper.silicon.state.terms._
 
-/** Experimental, enabled with -Dsilicon.exp.seqDistinctInverse=true.
+/** On by default; disabled with -Dsilicon.exp.seqDistinctInverse=false.
   *
   * Rewrites an assumed distinctness quantifier over a whole sequence
   *   forall i, j :: 0 <= i < |s| && 0 <= j < |s| && i != j ==> s[i] != s[j]
@@ -21,7 +21,7 @@ import viper.silicon.state.terms._
   * original form, so function axioms and replays into other provers never mention inv.
   */
 object SeqDistinctInverse {
-  val enabled: Boolean = java.lang.Boolean.getBoolean("silicon.exp.seqDistinctInverse")
+  val enabled: Boolean = !"false".equals(System.getProperty("silicon.exp.seqDistinctInverse"))
   private val log: Boolean = java.lang.Boolean.getBoolean("silicon.exp.seqDistinctInverse.log")
 
   /** Rewrites distinctness quantifiers in positive positions of `t`: conjuncts and implication
