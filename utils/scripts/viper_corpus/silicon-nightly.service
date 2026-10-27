@@ -1,0 +1,12 @@
+# Runs nightly.sh as last landed on origin/main; the copy in nightly/bin is refreshed before each run and kept when
+# the fetch fails. Install: copy this unit and silicon-nightly.timer to ~/.config/systemd/user, enable the timer.
+[Unit]
+Description=Nightly Silicon benchmark, fork origin/main against upstream master
+
+[Service]
+Type=oneshot
+Slice=silicon.slice
+TimeoutStartSec=infinity
+WorkingDirectory=%h/data/viper-corpus-results/nightly
+ExecStartPre=-/bin/sh -c 'git -C src/fork fetch -q origin main && git -C src/fork show FETCH_HEAD:utils/scripts/viper_corpus/nightly.sh > bin/nightly.sh.tmp && mv bin/nightly.sh.tmp bin/nightly.sh'
+ExecStart=/opt/bots/bin/run-reported --source silicon-nightly --title "Nightly Silicon benchmark failed" -- /bin/bash %h/data/viper-corpus-results/nightly/bin/nightly.sh
