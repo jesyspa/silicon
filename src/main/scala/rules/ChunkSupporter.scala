@@ -15,7 +15,6 @@ import viper.silicon.state.terms._
 import viper.silicon.state.terms.perms.IsPositive
 import viper.silicon.utils.ast.buildMinExp
 import viper.silicon.verifier.Verifier
-import viper.silicon.supporters.functions.NoopFunctionRecorder
 import viper.silver.ast
 import viper.silver.parser.PUnknown
 import viper.silver.verifier.VerificationError
@@ -177,26 +176,15 @@ object chunkSupporter extends ChunkSupportRules {
             (Incomplete(perms, permsExp), s, h, None)
           }
         } else if (consumeExact) {
-          /* PROTOTYPE (reborrows case study). Option A (-Dsilicon.proto.minSimp=true): if the solver proves
-           * perms <= ch.perm, take exactly perms instead of min(ch.perm, perms); then take/return pairs cancel via
-           * PermPlus(PermMinus(p, a), a) == p. Option B (-Dsilicon.proto.permMacro=true): name the new chunk
-           * permission with a fresh macro, so that its size is O(1) in every later term. */
-          val simpMin = java.lang.Boolean.getBoolean("silicon.proto.minSimp") &&
+          /* Experimental (-Dsilicon.exp.exactReborrow=true): if the solver proves perms <= ch.perm, take exactly
+           * perms instead of min(ch.perm, perms), so that a later return cancels via PermPlus(PermMinus(p, a), a) == p
+           * and permission terms do not double with every reborrow. */
+          val exactTake = java.lang.Boolean.getBoolean("silicon.exp.exactReborrow") &&
             v.decider.check(PermAtMost(perms, ch.perm), Verifier.config.checkTimeout())
-          val toTake = if (simpMin) perms else PermMin(ch.perm, perms)
-          val toTakeExp = if (simpMin) permsExp else permsExp.map(pe => buildMinExp(Seq(ch.permExp.get, pe), ast.Perm))
+          val toTake = if (exactTake) perms else PermMin(ch.perm, perms)
+          val toTakeExp = if (exactTake) permsExp else permsExp.map(pe => buildMinExp(Seq(ch.permExp.get, pe), ast.Perm))
           val newPermExp = permsExp.map(pe => ast.PermSub(ch.permExp.get, toTakeExp.get)(pe.pos, pe.info, pe.errT))
-          val newPermRaw = PermMinus(ch.perm, toTake)
-          val newPerm =
-            if (java.lang.Boolean.getBoolean("silicon.proto.permMacro") && !newPermRaw.isInstanceOf[PermLiteral]
-                && s.functionRecorder == NoopFunctionRecorder && Verifier.config.counterexample.toOption.isEmpty) {
-              val macroArgs = (s.functionRecorderQuantifiedVariables() ++ s.quantifiedVariables).map(_._1)
-              val decl = v.decider.freshMacro("gc_perm", macroArgs, newPermRaw)
-              val app = App(Macro(decl.id, decl.args.map(_.sort), decl.body.sort), macroArgs)
-              v.symbExLog.addMacro(app, newPermRaw)
-              app
-            } else newPermRaw
-          val newChunk = ch.withPerm(newPerm, newPermExp)
+          val newChunk = ch.withPerm(PermMinus(ch.perm, toTake), newPermExp)
           val takenChunk = Some(ch.withPerm(toTake, toTakeExp))
           var newHeap = h - ch
           if (!v.decider.check(newChunk.perm === NoPerm, Verifier.config.checkTimeout())) {
