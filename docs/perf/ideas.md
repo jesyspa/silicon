@@ -508,6 +508,10 @@ Warm JVM (JDK 21, Z3 4.16.0, 16 cores, desktop host with background load; round-
   All seven valid inputs are faster than main; the negative-test diagnostics match. A Voila input that failed parsing is excluded. These are end-to-end timings, not new measurements of the individual phases above. Runs were sequential in `silicon.slice` (40 GiB aggregate cap), with a 12 GiB scope cap, during daytime. Raw commands/results: `~/.claude-tmp/sil-corbin-2/scratchpad/{bench.log,measurements.jsonl,more/}`.
 - Default-on suite gate, JDK 21 / Z3 4.16.0, CPUs 0–1: 1,569 passed (including two command-stream guards), 62 canceled, 54 ignored; test execution 169 s. `Z3_EXE=~/data/viper-corpus-results/impact-20261027/z3-4.16.0`; async explicitly enabled in the forked test JVM. Log: `~/.claude-tmp/sil-corbin-2/scratchpad/suite.log`. A second full suite with async on and `-Dsilicon.exp.capWorkers=false` also passed all 1,569 tests in 185 s, covering reused worker streams; log `suite-uncapped.log` in the same directory. CLI smoke checks passed both with no switch and with `-Dsilicon.exp.asyncBroadcast=false`.
 
+## 16. Fresh-JVM class-data caches, 2026-10-28
+
+Launcher-only follow-up to §§13 and 15: [measurements and enablement commands](fresh-jvm-cache.md). On main `ae1d99dc`, six small/medium files × six fresh-JVM repetitions: JDK 21 AppCDS/default wall 0.736 [0.584, 0.928]; JDK 25 AOT/JDK 25 default 0.580 [0.503, 0.668]. Four alternating SnaKt pairs on JDK 25 show no established gain: summed JUnit 1.070 [0.672, 1.703], command wall 0.972 [0.568, 1.663]. Training inputs were disjoint from timed inputs; neither project's source changed. Recommend opt-in CLI documentation, not default-on flags or test-build integration.
+
 ## 12. Source index
 
 - Section 14: stage reports in `/opt/bots/log/workflow-runs/run-1792927685-e7215b-artifacts/.workflow-run/`; data directories listed at the top of section 14.
