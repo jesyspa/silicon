@@ -16,17 +16,17 @@ import viper.silver.components.StatefulComponent
 import viper.silicon.interfaces.decider.ProverLike
 import viper.silicon.state.terms.{Decl, Term}
 
-/** Experimental startup switches, all off by default:
-  *   -Dsilicon.exp.capWorkers=true         start the pool when the program is known, with at most one worker per
-  *                                         method and CFG (all workers if branches are parallelised)
-  *   -Dsilicon.exp.asyncBroadcast=true     send the preamble to each worker from that worker's own thread, so that
-  *                                         the workers' provers process it concurrently
-  *   -Dsilicon.exp.parallelLifecycle=true  start and stop the workers' provers concurrently
+/** Experimental startup switches:
+  *   -Dsilicon.exp.capWorkers=false         (on by default) start the pool when the program is known, with at most
+  *                                          one worker per method and CFG (all workers if branches are parallelised)
+  *   -Dsilicon.exp.parallelLifecycle=false  (on by default) start and stop the workers' provers concurrently
+  *   -Dsilicon.exp.asyncBroadcast=true      (off by default) send the preamble to each worker from that worker's own
+  *                                          thread, so that the workers' provers process it concurrently
   */
 object VerificationPoolManager {
-  val capWorkers: Boolean = java.lang.Boolean.getBoolean("silicon.exp.capWorkers")
+  val capWorkers: Boolean = !"false".equals(System.getProperty("silicon.exp.capWorkers"))
   val asyncBroadcast: Boolean = java.lang.Boolean.getBoolean("silicon.exp.asyncBroadcast")
-  val parallelLifecycle: Boolean = java.lang.Boolean.getBoolean("silicon.exp.parallelLifecycle")
+  val parallelLifecycle: Boolean = !"false".equals(System.getProperty("silicon.exp.parallelLifecycle"))
 }
 
 class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulComponent {

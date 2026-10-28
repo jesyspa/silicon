@@ -482,6 +482,7 @@ Warm JVM (JDK 21, Z3 4.16.0, 16 cores, desktop host with background load; round-
   4. Pipelined emission inside one prover: write a chunk of commands, then read the `success` replies. Bound the chunk to stay below the pipe buffers, or both processes block. This would make the memory-out replay of `lastCommand` in `readSuccess` wrong. Worth about 3 ms per prover.
   5. AppCDS for the CLI and test JVMs: about 0.55 s per cold start.
   6. Reusing provers across verifications (`(reset)` instead of respawning): after 1-3 at most 2-5 ms per verification remain, so not worth the risk.
+- Follow-up, same day: capWorkers and parallelLifecycle are now on by default (`-Dsilicon.exp.capWorkers=false` and `-Dsilicon.exp.parallelLifecycle=false` restore the old behaviour). asyncBroadcast stays off until it batches commands.
 
 ## 12. Source index
 
