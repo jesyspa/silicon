@@ -230,8 +230,8 @@ class Config(args: Seq[String]) extends SilFrontendConfig(args, "Silicon") {
              + "If the attempt reaches the timeout, the prover is restarted with its current state "
              + "and the assertion is retried without a timeout. Z3 can "
              + "find a proof in a fresh prover that it does not find after the preceding queries "
-             + "(default: 1500, 0 disables the retry)."),
-    default = Some(1500),
+             + "(0 disables the retry)."),
+    default = Some(0),
     noshort = true
   )
 

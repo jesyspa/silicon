@@ -94,9 +94,10 @@ class ProverMemoryOutTests extends AnyFunSuite {
 
   private def withProver(body: FailingProver => Unit): Unit = withProver(new FailingProver)(body)
 
-  private def withProver(newProver: => FailingProver)(body: FailingProver => Unit): Unit = {
+  private def withProver(newProver: => FailingProver, retryOptions: List[String] = List("--assertRetryTimeout", "1500"))
+                        (body: FailingProver => Unit): Unit = {
     val backend = new Silicon(List("startedBy" -> s"Unit test ${this.getClass.getSimpleName}"))
-    backend.parseCommandLine(List("--numberOfParallelVerifiers", "1", "dummy.sil"))
+    backend.parseCommandLine(List("--numberOfParallelVerifiers", "1") ++ retryOptions ++ List("dummy.sil"))
     backend.start()
     val prover = newProver
     prover.start()
@@ -157,6 +158,18 @@ class ProverMemoryOutTests extends AnyFunSuite {
       assert(prover.assert("(> x 0)", None))
       assert(!prover.assert("(> x 2)", None))
       assert(!prover.ranOutOfMemory())
+    }
+  }
+
+  test("Assertions do not retry unless explicitly enabled") {
+    withProver(new FailingProver, retryOptions = Nil) { prover =>
+      prover.emit("(declare-const x Int)")
+      prover.replace = List("(check-sat)" -> "unknown")
+      assert(!prover.assert("(> x 0)", None))
+      assert(prover.replace.isEmpty)
+      assert(prover.starts == 1)
+      assert(!prover.sent.contains("(get-info :reason-unknown)"))
+      assert(!prover.sent.exists(cmd => cmd.startsWith("(set-option :rlimit ") && cmd != "(set-option :rlimit 0)"))
     }
   }
 
