@@ -216,9 +216,13 @@ class DefaultMainVerifier(config: Config,
     allProvers.comment("Begin preamble")
 
     allProvers.comment("/" * 10 + " Static preamble")
-    emitStaticPreamble(allProvers)
+    _verificationPoolManager.withBroadcastBatch {
+      emitStaticPreamble(allProvers)
+    }
 
-    val (functionData, predicateData) = analyzeProgramAndEmitPreambleContributions(program, allProvers) // TODO: Add support for cfgs.
+    val (functionData, predicateData) = _verificationPoolManager.withBroadcastBatch {
+      analyzeProgramAndEmitPreambleContributions(program, allProvers) // TODO: Add support for cfgs.
+    }
 
     allProvers.comment("End preamble")
     allProvers.comment("-" * 60)
@@ -266,14 +270,19 @@ class DefaultMainVerifier(config: Config,
 
     _verificationPoolManager.pooledVerifiers.comment("-" * 60)
     _verificationPoolManager.pooledVerifiers.comment("Begin function- and predicate-related preamble")
-    predicateSupporter.declareSortsAfterVerification(_verificationPoolManager.pooledVerifiers)
-    functionsSupporter.declareSortsAfterVerification(_verificationPoolManager.pooledVerifiers)
-    predicateSupporter.declareSymbolsAfterVerification(_verificationPoolManager.pooledVerifiers)
-    functionsSupporter.declareSymbolsAfterVerification(_verificationPoolManager.pooledVerifiers)
-    predicateSupporter.emitAxiomsAfterVerification(_verificationPoolManager.pooledVerifiers)
-    functionsSupporter.emitAxiomsAfterVerification(_verificationPoolManager.pooledVerifiers)
+    _verificationPoolManager.withBroadcastBatch {
+      predicateSupporter.declareSortsAfterVerification(_verificationPoolManager.pooledVerifiers)
+      functionsSupporter.declareSortsAfterVerification(_verificationPoolManager.pooledVerifiers)
+      predicateSupporter.declareSymbolsAfterVerification(_verificationPoolManager.pooledVerifiers)
+      functionsSupporter.declareSymbolsAfterVerification(_verificationPoolManager.pooledVerifiers)
+      predicateSupporter.emitAxiomsAfterVerification(_verificationPoolManager.pooledVerifiers)
+      functionsSupporter.emitAxiomsAfterVerification(_verificationPoolManager.pooledVerifiers)
+    }
     _verificationPoolManager.pooledVerifiers.comment("End function- and predicate-related preamble")
     _verificationPoolManager.pooledVerifiers.comment("-" * 60)
+
+    // Also surface worker failures in programs without method or CFG tasks.
+    _verificationPoolManager.awaitBroadcast()
 
     val verificationTaskFutures: Seq[Future[Seq[VerificationResult]]] =
       program.methods.filterNot(excludeMethod).map(method => {

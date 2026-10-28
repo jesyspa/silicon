@@ -20,12 +20,12 @@ import viper.silicon.state.terms.{Decl, Term}
   *   -Dsilicon.exp.capWorkers=false         (on by default) start the pool when the program is known, with at most
   *                                          one worker per method and CFG (all workers if branches are parallelised)
   *   -Dsilicon.exp.parallelLifecycle=false  (on by default) start and stop the workers' provers concurrently
-  *   -Dsilicon.exp.asyncBroadcast=true      (off by default) send the preamble to each worker from that worker's own
-  *                                          thread, so that the workers' provers process it concurrently
+  *   -Dsilicon.exp.asyncBroadcast=false     (on by default) send batched preamble sections from each worker's own
+  *                                          thread, so that the workers' provers process them concurrently
   */
 object VerificationPoolManager {
   val capWorkers: Boolean = !"false".equals(System.getProperty("silicon.exp.capWorkers"))
-  val asyncBroadcast: Boolean = java.lang.Boolean.getBoolean("silicon.exp.asyncBroadcast")
+  val asyncBroadcast: Boolean = !"false".equals(System.getProperty("silicon.exp.asyncBroadcast"))
   val parallelLifecycle: Boolean = !"false".equals(System.getProperty("silicon.exp.parallelLifecycle"))
 }
 
@@ -38,25 +38,44 @@ class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulCompon
   /*private*/ var workerVerifiers: Seq[WorkerVerifier] = _
   /*private*/ var threadPool: ForkJoinPool = _
   /*private*/ var workerVerifierPool: ObjectPool[WorkerVerifier] = _
-  /* One single-threaded executor per worker under asyncBroadcast, and the last command queued on it. */
-  private var workerExecutors: Seq[ExecutorService] = Seq.empty
-  @volatile private var pendingCommands: Seq[Future[_]] = Seq.empty
+  /* Each worker has an ordered command stream; preamble sections share one task per stream. */
+  private var workerCommands: Seq[ProverCommandQueue] = Seq.empty
+  private var broadcastBatchDepth = 0
+  private var batchedCommands = Vector.empty[ProverLike => Unit]
 
   /** Applies `command` to each worker's prover, in order per worker; under asyncBroadcast, without waiting for it. */
   private def broadcast(command: ProverLike => Unit): Unit = {
-    if (workerExecutors.isEmpty) workerVerifiers foreach (worker => command(worker.decider.prover))
-    else pendingCommands = workerVerifiers.zip(workerExecutors).map { case (worker, executor) =>
-      executor.submit((() => command(worker.decider.prover)): Runnable)
+    if (workerCommands.isEmpty) workerVerifiers foreach (worker => command(worker.decider.prover))
+    else if (broadcastBatchDepth > 0) batchedCommands :+= command
+    else submitBroadcast(command)
+  }
+
+  private def submitBroadcast(command: ProverLike => Unit): Unit = {
+    workerVerifiers.zip(workerCommands).foreach { case (worker, queue) =>
+      queue.submit(() => command(worker.decider.prover))
     }
   }
 
-  /** Waits for the commands that [[broadcast]] queued, and rethrows the first failure. */
+  /** Batches a preamble section without delaying commands to the main prover. */
+  def withBroadcastBatch[A](body: => A): A = {
+    broadcastBatchDepth += 1
+    try body
+    finally {
+      broadcastBatchDepth -= 1
+      if (broadcastBatchDepth == 0) flushBroadcastBatch()
+    }
+  }
+
+  private def flushBroadcastBatch(): Unit = {
+    val commands = batchedCommands
+    batchedCommands = Vector.empty
+    if (commands.nonEmpty) submitBroadcast(prover => commands.foreach(_(prover)))
+  }
+
+  /** Waits for all queued commands, including failures in earlier batches. */
   def awaitBroadcast(): Unit = {
-    val pending = pendingCommands
-    pendingCommands = Seq.empty
-    pending foreach (future =>
-      try future.get()
-      catch { case e: ExecutionException => throw e.getCause })
+    flushBroadcastBatch()
+    workerCommands.foreach(_.await())
   }
 
   private[verifier] object pooledVerifiers extends ProverLike {
@@ -124,7 +143,7 @@ class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulCompon
       assert(workerVerifiers.length == poolConfig.getMaxTotal)
       if (parallelLifecycle) runAll(workerVerifiers.map(worker => () => worker.start()))
       else workerVerifiers foreach (_.start())
-      if (asyncBroadcast) workerExecutors = workerVerifiers.map(_ => Executors.newSingleThreadExecutor())
+      if (asyncBroadcast) workerCommands = workerVerifiers.map(_ => new ProverCommandQueue)
 
       threadPool = new ForkJoinPool(poolConfig.getMaxTotal, new WorkerBorrowingForkJoinThreadFactory(), null, false)
     } catch {
@@ -138,7 +157,10 @@ class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulCompon
   
   private def resetWorkerPool(): Unit = {
     if (capWorkers) teardownWorkerPool() /* [[ensureStarted]] sizes the pool for the next program */
-    else workerVerifiers foreach (_.reset())
+    else {
+      workerCommands.foreach(_.reset())
+      workerVerifiers foreach (_.reset())
+    }
   }
 
   private def teardownWorkerPool(): Unit = {
@@ -146,18 +168,19 @@ class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulCompon
     val pool = threadPool
     val workers = workerVerifiers
     val verifierPool = workerVerifierPool
-    val executors = workerExecutors
+    val commands = workerCommands
     threadPool = null
     workerVerifiers = null
     workerVerifierPool = null
-    workerExecutors = Seq.empty
-    pendingCommands = Seq.empty
+    workerCommands = Seq.empty
+    batchedCommands = Vector.empty
+    broadcastBatchDepth = 0
 
     try {
       Cleanup.run(
         // Cancel queued work before stopping provers: it must not start on a stopped verifier.
         () => if (pool != null) { pool.shutdownNow(); () },
-        () => executors foreach (_.shutdownNow()),
+        () => commands foreach (_.shutdownNow()),
         () => if (workers != null) runAll(workers.map(worker => () => worker.stop())),
         // Destroying the provers above also releases workers blocked on solver output.
         () => if (pool != null && !pool.awaitTermination(10, TimeUnit.SECONDS)) {

@@ -482,7 +482,22 @@ Warm JVM (JDK 21, Z3 4.16.0, 16 cores, desktop host with background load; round-
   4. Pipelined emission inside one prover: write a chunk of commands, then read the `success` replies. Bound the chunk to stay below the pipe buffers, or both processes block. This would make the memory-out replay of `lastCommand` in `readSuccess` wrong. Worth about 3 ms per prover.
   5. AppCDS for the CLI and test JVMs: about 0.55 s per cold start.
   6. Reusing provers across verifications (`(reset)` instead of respawning): after 1-3 at most 2-5 ms per verification remain, so not worth the risk.
-- Follow-up, same day: capWorkers and parallelLifecycle are now on by default (`-Dsilicon.exp.capWorkers=false` and `-Dsilicon.exp.parallelLifecycle=false` restore the old behaviour). asyncBroadcast stays off until it batches commands.
+- Follow-up, same day: capWorkers, parallelLifecycle and asyncBroadcast are on by default. Set the corresponding `-Dsilicon.exp.<name>=false` to restore the synchronous/uncapped lifecycle paths.
+- Batched async broadcast: static, program-specific and post-function/predicate preamble sections each submit one ordered task per worker (settings that need a reply flush the current batch). An earlier worker failure poisons its command stream; later submissions cannot replace the original exception. The main verifier drains streams before method/CFG submission, including programs without either kind of task. Ordering and original-exception identity have regression guards.
+- Warm comparison against current main `5594c850`: JDK 21.0.10, pinned Z3 4.16.0, 16 configured workers, default worker capping (one worker for the trivial file, 16 for all other rows). Three separate warm JVMs, randomized arm order per file/round, 15 warm-up rounds then 25 measured rounds. Every `-D` was a separate JVM argument. Median frontend execute-through-stop wall times, ms:
+
+  | File | Main defaults | Main + old async | Batched async |
+  |---|---:|---:|---:|
+  | Trivial increment, 1 method | 21.8 | 18.5 | 18.7 |
+  | Increment, 16 methods | 83.4 | 42.5 | 41.2 |
+  | Increment, 64 methods | 97.0 | 55.8 | 55.9 |
+  | Nagini `testsfunctionalverificationtest_generic_methods.py.vpr`, 16 methods | 744.7 | 431.5 | 407.5 |
+  | Silver `all/basic/methods.vpr`, 17 methods | 106.4 | 54.3 | 54.2 |
+  | Silver `all/basic/quantifiers.vpr`, 17 methods | 288.0 | 140.3 | 137.9 |
+  | Silver `all/functions/function_precondition_perms.vpr`, 47 methods | 256.7 | 125.0 | 116.3 |
+
+  All seven valid inputs are faster than main; the negative-test diagnostics match. A Voila input that failed parsing is excluded. These are end-to-end timings, not new measurements of the individual phases above. Runs were sequential in `silicon.slice` (40 GiB aggregate cap), with a 12 GiB scope cap, during daytime. Raw commands/results: `~/.claude-tmp/sil-corbin-2/scratchpad/{bench.log,measurements.jsonl,more/}`.
+- Default-on suite gate, JDK 21 / Z3 4.16.0, CPUs 0–1: 1,569 passed (including two command-stream guards), 62 canceled, 54 ignored; test execution 169 s. `Z3_EXE=~/data/viper-corpus-results/impact-20261027/z3-4.16.0`; async explicitly enabled in the forked test JVM. Log: `~/.claude-tmp/sil-corbin-2/scratchpad/suite.log`. A second full suite with async on and `-Dsilicon.exp.capWorkers=false` also passed all 1,569 tests in 185 s, covering reused worker streams; log `suite-uncapped.log` in the same directory. CLI smoke checks passed both with no switch and with `-Dsilicon.exp.asyncBroadcast=false`.
 
 ## 12. Source index
 
