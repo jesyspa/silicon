@@ -241,12 +241,21 @@ See section 1. pair_insertion_sort with `memory_max_size=4000` (Z3 4.16): fix re
 - Correctness: tests for updates, right-biased unions, absent keys, None expression values, equivalent AST keys, immutable updates.
 - Why not landed: needs combined residual profile and broader controls. Both starling and desdemona state it is not a tenfold end-to-end result. Only the bam_load family (Ru2) was measured; the effect on the 250-file night is inside the integrated build (section 7), where bam_load variants improved to 0.27-0.29 of main.
 
-### 5.2 Structural-sharing size precheck (`e544f5f9`, `a696fba7`; in integrated; not on main)
+### 5.2 Structural-sharing size precheck (`e544f5f9`, `a696fba7`; landed 2026-10-28)
 - What: before building a structural sharing analysis for SMT conversion, a bounded identity-based unfolded-size precheck (saturating at 10,000; memoized subtree sizes per incoming edge) skips analysis for provably small term trees; a696fba7 bounds precheck traversal and respects binder boundaries. Background: each eligible conversion built a fresh sharing analysis even when thresholds rejected it (amadeo-2).
 - Commits e544f5f9, a696fba7 (`request-bounded-profile`, `real-jvm-validation`), integrated via e2263af3.
-- Effect: only combined (Store-only -> Store+precheck): starling bam MemorySafety 23.49 -> 13.05 s, functional 16.63 -> 11.93 s, refcell 7.54 -> 8.17 s (slower); desdemona second batch ratio 1.80x / 1.39x / 0.92x. Store-only timing shifted between batches; do not multiply the two batches. No isolated number for the precheck alone.
+- Earlier combined evidence (Store-only -> Store+precheck): bam MemorySafety 23.49 -> 13.05 s, functional 16.63 -> 11.93 s, refcell 7.54 -> 8.17 s (slower). Store-only timing shifted between batches; do not multiply these with the Store-fix gains.
+- Isolated on main `76810ca5` (including Store `980151d5`, frontend allocation fixes and let-sharing), 2026-10-28: warm JDK 21.0.10 / Z3 4.16.0, seeds 0–3, one verifier, adjacent same-seed arm pairs with alternating order, CPUs 8–15, `silicon.slice` 40 GiB aggregate cap, 6 GiB heap / 3 GB Z3 cap, daytime. Three bam warm-ups per arm; allocation is process-wide `ThreadMXBean.getTotalThreadAllocatedBytes` around each request, excluding idle collection. Medians over seeds:
+
+  | File | Main → precheck wall, s | Main → precheck allocation, decimal GB |
+  |---|---:|---:|
+  | Ru2/061 bam Block--load MemorySafety | 25.316 → 14.292 | 6.037 → 5.848 |
+  | Ru2/061 bam Block--load MemorySafetyWithFunctional | 19.206 → 13.724 | 5.264 → 5.123 |
+  | Ru3/mendel/refcell.vpr | 6.053 → 6.105 | 6.040 → 5.893 |
+
+- Random 40-file sample of the deduplicated 4,009-file corpus (sampling seed 20261028), same four paired solver seeds: geomean of per-file seed-median wall ratios 0.971, file-bootstrap 95% CI [0.932, 1.002]; allocation 0.978 [0.976, 0.981]; JVM CPU 0.926 [0.854, 0.993]. Sample wall totals 538.60 → 505.15 s. No measured sample slowdown; the CI includes neutrality. Refcell's +0.9% median wall change is small and inconsistent across seeds. The old 58.8 → 6.8 GB combined result is not the isolated precheck effect.
 - Correctness: 7 tests incl. a 162-identity DAG with more than Long.MaxValue unfolded nodes; a unique-identity implementation is rejected by the huge-DAG test.
-- Why not landed: no combined residual profile; broader controls not run.
+- Gate: 344 requests (43 files × 4 seeds × 2 arms), identical paired outcomes and full logs after normalizing build IDs and durations; each arm 151 verified / 20 failed / 1 timeout. The array-list sample has the same seed-dependent timeout and memory-out restart in both arms. Pinned-Z3 Silicon suite: 1,574 passed, 0 failed, 62 canceled, 54 ignored. Source changes and all precheck guards retained; benchmark instrumentation is external only. Data and analysis: `~/data/viper-corpus-results/sharing-precheck-20261028/`.
 
 ### 5.3 Other rebuilt-structure candidates seen in profiling (proposed only)
 - Generic term transform (`state/Utils.scala:153-161, 300-309`) rebuilds every occurrence with no memo table (amadeo-2).
@@ -337,7 +346,7 @@ Revised 2026-10-27 from the seeded data (section 14). Ordered roughly by measure
 1. **Store lookup fix (302e29e2) on main.** Seeded wall 0.951 [0.909, 0.993] (n=155), 0.892 on files ≥ 5 s; suite clean (14.2). Land; then the sharing precheck (lead 4) on top.
 2. **Fix the baseline-position bias in `night.py`** (14.8): interleave baseline seeds, or take caps from the profile. Until then keep an A/A arm in every `--baseline` night.
 3. **Done 2026-10-27: the sequence-distinctness rewrite is on by default** (14.5): fixes the worst suite lottery (linked-list-qp-append); fires in 12 of 62 checked files; corpus-neutral. Needs a default-on suite run and a decision, not more corpus time.
-4. **Sharing precheck (e544f5f9/a696fba7) isolated** on top of the Store fix. With it, bam Block--load allocation is 6.8 vs 58.8 GB per request (14.2).
+4. **Done 2026-10-28: sharing precheck (e544f5f9/a696fba7)** isolated on top of the Store fix and landed; measurements and gates in 5.2.
 5. **Silver frontend allocation fix (bda9a9da)** via a gitlink bump (14.7).
 6. **E's remaining costs** (14.3): bound the first attempt by wall time as well as rlimit (list-buggy first attempts take 37-80 s), and decide whether failing files near the timeout may be 1.3x slower.
 7. **QP inverse-function axiom triggers** (14.7, item7): `{down(r)}` on invOfFct/fctOfInv loops on FencesDblMsgPassAcqRewrite; dropping it in a replay finishes the stalled push in 25 s. Same matcher as the aux filter.
