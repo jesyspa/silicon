@@ -457,6 +457,32 @@ Main with all of the above vs the original 572cf2c8 (`impact-20261027`, T2, ≥3
 - Intermittent `StackOverflowError` in the evaluator on Ru3/mendel/assignments.vpr (night 1 W50, night 2 Skip and Retry, 10-23 night): unexplained, not arm-specific.
 - linked-list-qp-append makes suite wall time unusable (13 s to a 600 s timeout or 8 GB Z3 on main); use `suite_times.py`, or turn on the distinctness rewrite.
 
+## 15. Per-verification startup cost, 2026-10-28
+
+Warm JVM (JDK 21, Z3 4.16.0, 16 cores, desktop host with background load; round-to-round noise about 20%). Phase timers were temporary and are not in the tree.
+
+- Trivial one-method file, default 16 workers, warm: 120-190 ms, against 24 ms with `--numberOfParallelVerifiers 1`. Frontend phases (parse, typecheck, translation, consistency) take 2 ms. The rest scales with the worker count, 17 provers including the main one:
+  - static preamble (`z3config.smt2`, `preamble.smt2`, about 100 commands): 55-108 ms. Each command is a blocking round trip, sent to each prover in turn.
+  - pool start, 24-28 ms: per prover, spawn about 1 ms plus about 1 ms until `(get-info :version)` answers, run serially.
+  - teardown, 12-27 ms: `destroyForcibly` and `waitFor` per prover, serially.
+  - saturation `check-sat` 13 ms, program preamble 6 ms; the method itself takes 2 ms.
+- The pool is started in `configureVerifier`, before parsing, so the worker count cannot depend on the program.
+- Prototypes, all off by default (`VerificationPoolManager`):
+  - `-Dsilicon.exp.capWorkers=true`: start the pool in `verify` with min(workers, methods + CFGs) workers; all workers when `--parallelizeBranches` is set. Trivial file: 23 ms.
+  - `-Dsilicon.exp.asyncBroadcast=true`: queue each pooled-prover command on a per-worker thread; the queue is drained before the first method task. Static preamble 55 → 4 ms and saturation 13 → 2 ms, but the program preamble went 6 → 12 ms from executor overhead on many small commands. Trivial file: 67 ms.
+  - `-Dsilicon.exp.parallelLifecycle=true`: start and stop worker provers concurrently. Start 26 → 4.5 ms, stop 12 → 3 ms. Trivial file: 92 ms.
+  - All three: 18 ms.
+- 40 random suite files, warm, 5 rounds, last-round wall: base 15.9 s; cap 9.2; async 11.2; parallel 16.1; all 8.3. Verification results were identical in every arm.
+- Silicon suite (`sbt test`, 1567 tests pass in all four runs): on 2 cores (2 workers, as in the suite gates) base 228 s, all three 207 s. Unpinned on 16 cores, base takes 520 s and all three 233 s. Per-test median: 0.217 → 0.036 s at 16 cores and 0.058 → 0.048 s at 2 cores. Tests over 1 s barely change (139.8 → 133.7 s summed), and they are slower at 16 workers than at 2 (80 s).
+- Cold CLI, trivial file: 1.3 s base and 1.17 s with all three switches. An AppCDS archive (`-XX:ArchiveClassesAtExit`, then `-XX:SharedArchiveFile`, 56 MB) gives 0.61 s. The archive is launcher-only, with no code change; ViperServer does not benefit.
+- Ranked remaining ideas:
+  1. capWorkers by default. It is the largest win for ViperServer clients, whose files mostly have fewer methods than cores. Risks: Brancher's `parallelizeBranches` is already excluded. On reuse, `reset` tears the pool down and rebuilds it, so a reused Silicon instance no longer keeps its warm provers.
+  2. parallelLifecycle by default. Low risk; it also helps programs with many methods.
+  3. asyncBroadcast, after batching small commands per worker (one task per `emit(Iterable)` or per preamble section) to remove the program-preamble regression. Risk: a deferred prover failure surfaces at the first method task, not at the emitting command.
+  4. Pipelined emission inside one prover: write a chunk of commands, then read the `success` replies. Bound the chunk to stay below the pipe buffers, or both processes block. This would make the memory-out replay of `lastCommand` in `readSuccess` wrong. Worth about 3 ms per prover.
+  5. AppCDS for the CLI and test JVMs: about 0.55 s per cold start.
+  6. Reusing provers across verifications (`(reset)` instead of respawning): after 1-3 at most 2-5 ms per verification remain, so not worth the risk.
+
 ## 12. Source index
 
 - Section 14: stage reports in `/opt/bots/log/workflow-runs/run-1792927685-e7215b-artifacts/.workflow-run/`; data directories listed at the top of section 14.

@@ -16,35 +16,92 @@ import viper.silver.components.StatefulComponent
 import viper.silicon.interfaces.decider.ProverLike
 import viper.silicon.state.terms.{Decl, Term}
 
+/** Experimental startup switches, all off by default:
+  *   -Dsilicon.exp.capWorkers=true         start the pool when the program is known, with at most one worker per
+  *                                         method and CFG (all workers if branches are parallelised)
+  *   -Dsilicon.exp.asyncBroadcast=true     send the preamble to each worker from that worker's own thread, so that
+  *                                         the workers' provers process it concurrently
+  *   -Dsilicon.exp.parallelLifecycle=true  start and stop the workers' provers concurrently
+  */
+object VerificationPoolManager {
+  val capWorkers: Boolean = java.lang.Boolean.getBoolean("silicon.exp.capWorkers")
+  val asyncBroadcast: Boolean = java.lang.Boolean.getBoolean("silicon.exp.asyncBroadcast")
+  val parallelLifecycle: Boolean = java.lang.Boolean.getBoolean("silicon.exp.parallelLifecycle")
+}
+
 class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulComponent {
-  private val numberOfWorkers: Int = Verifier.config.numberOfParallelVerifiers()
+  import VerificationPoolManager._
+
+  private val configuredWorkers: Int = Verifier.config.numberOfParallelVerifiers()
+  private var numberOfWorkers: Int = configuredWorkers
 
   /*private*/ var workerVerifiers: Seq[WorkerVerifier] = _
   /*private*/ var threadPool: ForkJoinPool = _
   /*private*/ var workerVerifierPool: ObjectPool[WorkerVerifier] = _
+  /* One single-threaded executor per worker under asyncBroadcast, and the last command queued on it. */
+  private var workerExecutors: Seq[ExecutorService] = Seq.empty
+  @volatile private var pendingCommands: Seq[Future[_]] = Seq.empty
+
+  /** Applies `command` to each worker's prover, in order per worker; under asyncBroadcast, without waiting for it. */
+  private def broadcast(command: ProverLike => Unit): Unit = {
+    if (workerExecutors.isEmpty) workerVerifiers foreach (worker => command(worker.decider.prover))
+    else pendingCommands = workerVerifiers.zip(workerExecutors).map { case (worker, executor) =>
+      executor.submit((() => command(worker.decider.prover)): Runnable)
+    }
+  }
+
+  /** Waits for the commands that [[broadcast]] queued, and rethrows the first failure. */
+  def awaitBroadcast(): Unit = {
+    val pending = pendingCommands
+    pendingCommands = Seq.empty
+    pending foreach (future =>
+      try future.get()
+      catch { case e: ExecutionException => throw e.getCause })
+  }
 
   private[verifier] object pooledVerifiers extends ProverLike {
-    def emit(content: String): Unit = workerVerifiers foreach (_.decider.prover.emit(content))
-    override def emit(contents: Iterable[String]): Unit = workerVerifiers foreach (_.decider.prover.emit(contents))
-    def assume(term: Term): Unit = workerVerifiers foreach (_.decider.prover.assume(term))
-    override def assumeAxioms(terms: InsertionOrderedSet[Term], description: String): Unit = workerVerifiers foreach (_.decider.prover.assumeAxioms(terms, description))
-    def declare(decl: Decl): Unit =  workerVerifiers foreach (_.decider.prover.declare(decl))
+    def emit(content: String): Unit = broadcast(_.emit(content))
+    override def emit(contents: Iterable[String]): Unit = broadcast(_.emit(contents))
+    def assume(term: Term): Unit = broadcast(_.assume(term))
+    override def assumeAxioms(terms: InsertionOrderedSet[Term], description: String): Unit = broadcast(_.assumeAxioms(terms, description))
+    def declare(decl: Decl): Unit = broadcast(_.declare(decl))
     def comment(content: => String): Unit = {
-      lazy val c = content
-      workerVerifiers foreach (_.decider.prover.comment(c))
+      // Evaluated here, so that queued comments do not read state that the caller changes later.
+      if (Verifier.config.outputProverLog) {
+        val c = content
+        broadcast(_.comment(c))
+      }
     }
 
     def saturate(data: Option[Config.ProverStateSaturationTimeout]): Unit =
-      workerVerifiers foreach (_.decider.prover.saturate(data))
+      broadcast(_.saturate(data))
 
     def saturate(timeout: Int, comment: String): Unit =
-      workerVerifiers foreach (_.decider.prover.saturate(timeout, comment))
+      broadcast(_.saturate(timeout, comment))
 
     override def emitSettings(contents: Iterable[String]): Unit =
-      workerVerifiers foreach (_.decider.prover.emitSettings(contents))
+      broadcast(_.emitSettings(contents))
 
-    override def setOption(name: String, value: String): String =
+    override def setOption(name: String, value: String): String = {
+      awaitBroadcast()
       (workerVerifiers map (_.decider.prover.setOption(name, value))).head
+    }
+  }
+
+  /** Runs `actions` concurrently under parallelLifecycle, otherwise in order, and rethrows the first failure. */
+  private def runAll(actions: Seq[() => Unit]): Unit = {
+    if (!parallelLifecycle || actions.length < 2) Cleanup.run(actions: _*)
+    else {
+      val executor = Executors.newFixedThreadPool(actions.length)
+      try {
+        val futures = actions.map(action => executor.submit((() => action()): Runnable))
+        Cleanup.run(futures.map(future => () => {
+          try future.get()
+          catch { case e: ExecutionException => throw e.getCause }
+          ()
+        }): _*)
+      } finally executor.shutdown()
+    }
   }
 
   /* Verifier pool management */
@@ -65,7 +122,9 @@ class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulCompon
       workerVerifierPool.addObjects(poolConfig.getMaxTotal)
 
       assert(workerVerifiers.length == poolConfig.getMaxTotal)
-      workerVerifiers foreach (_.start())
+      if (parallelLifecycle) runAll(workerVerifiers.map(worker => () => worker.start()))
+      else workerVerifiers foreach (_.start())
+      if (asyncBroadcast) workerExecutors = workerVerifiers.map(_ => Executors.newSingleThreadExecutor())
 
       threadPool = new ForkJoinPool(poolConfig.getMaxTotal, new WorkerBorrowingForkJoinThreadFactory(), null, false)
     } catch {
@@ -78,7 +137,8 @@ class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulCompon
   }
   
   private def resetWorkerPool(): Unit = {
-    workerVerifiers foreach (_.reset())
+    if (capWorkers) teardownWorkerPool() /* [[ensureStarted]] sizes the pool for the next program */
+    else workerVerifiers foreach (_.reset())
   }
 
   private def teardownWorkerPool(): Unit = {
@@ -86,17 +146,19 @@ class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulCompon
     val pool = threadPool
     val workers = workerVerifiers
     val verifierPool = workerVerifierPool
+    val executors = workerExecutors
     threadPool = null
     workerVerifiers = null
     workerVerifierPool = null
+    workerExecutors = Seq.empty
+    pendingCommands = Seq.empty
 
     try {
       Cleanup.run(
         // Cancel queued work before stopping provers: it must not start on a stopped verifier.
         () => if (pool != null) { pool.shutdownNow(); () },
-        () => if (workers != null) {
-          Cleanup.run(workers.map(worker => () => worker.stop()): _*)
-        },
+        () => executors foreach (_.shutdownNow()),
+        () => if (workers != null) runAll(workers.map(worker => () => worker.stop())),
         // Destroying the provers above also releases workers blocked on solver output.
         () => if (pool != null && !pool.awaitTermination(10, TimeUnit.SECONDS)) {
           mainVerifier.logger.warn("verifier pool threads did not terminate within 10 seconds")
@@ -126,6 +188,7 @@ class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulCompon
 
   def queueVerificationTask(task: WorkerVerifier => Seq[VerificationResult])
                            : Future[Seq[VerificationResult]] = {
+    awaitBroadcast()
     val thread = Thread.currentThread()
     if (thread.isInstanceOf[WorkerBorrowingForkJoinWorkerThread]){
       new WorkerAwareForkJoinTask(task).fork
@@ -137,7 +200,17 @@ class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulCompon
   /* Lifetime */
 
   def start(): Unit = {
-    setupWorkerPool()
+    if (!capWorkers) setupWorkerPool()
+  }
+
+  /** Under capWorkers, starts the pool for a program with `tasks` top-level verification tasks. */
+  def ensureStarted(tasks: Int): Unit = {
+    if (capWorkers && workerVerifiers == null) {
+      numberOfWorkers =
+        if (Verifier.config.parallelizeBranches()) configuredWorkers
+        else math.max(1, math.min(configuredWorkers, tasks))
+      setupWorkerPool()
+    }
   }
 
   def reset(): Unit = {

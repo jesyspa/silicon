@@ -205,6 +205,8 @@ class DefaultMainVerifier(config: Config,
 
     predSnapGenerator.setup(program) // TODO: Why did Nadja put this here?
 
+    _verificationPoolManager.ensureStarted(program.methods.count(!excludeMethod(_)) + cfgs.length)
+
 
     allProvers.comment("Started: " + new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(System.currentTimeMillis()) /*bookkeeper.formattedStartTime*/)
     allProvers.comment("Silicon.version: " + Silicon.version)
