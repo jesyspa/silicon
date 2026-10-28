@@ -41,8 +41,27 @@ class Z3ProverStdIO(uniqueId: String,
   val startUpArgs = Z3ProverStdIO.startUpArgs
   val randomizeSeedsOptions = Z3ProverStdIO.randomizeSeedsOptions
 
+  private var lastFirstWall: Int = -1
+
+  override protected def connectToProver(): Unit = {
+    super.connectToProver()
+    lastFirstWall = -1
+  }
+
   protected def setTimeout(timeout: Option[Int]): Unit = {
     val effectiveTimeout = timeout.getOrElse(Verifier.config.proverTimeout)
+
+    /* Keep the experimental wall bound separate from the resource budget. Reset it for ordinary queries
+     * and retries, including after a definite first answer that does not restart the prover.
+     */
+    if (retryPolicy.firstWall > 0 && !Verifier.config.proverEnableTimeBounds()) {
+      val wall = if (isRetryableAttempt) retryPolicy.firstWall else 0
+      if (lastFirstWall != wall) {
+        writeLine(s"(set-option :timeout $wall)")
+        readSuccess()
+        lastFirstWall = wall
+      }
+    }
 
     /* [2015-07-27 Malte] Setting the timeout unnecessarily often seems to
      * worsen performance, if only a bit. For the current test suite of

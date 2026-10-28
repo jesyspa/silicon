@@ -320,7 +320,8 @@ abstract class ProverStdIO(uniqueId: String,
          */
         isRetryableAttempt = true
         val (firstResult, firstDuration) =
-          try assertInMode(goal, Some(retryTimeout)) finally isRetryableAttempt = false
+          try assertInMode(goal, Some(retryPolicy.firstTimeout.getOrElse(retryTimeout)))
+          finally isRetryableAttempt = false
         if (firstResult || lastCheckRanOutOfMemory || !lastCheckReachedTimeout) {
           (firstResult, firstDuration)
         } else {
@@ -355,10 +356,22 @@ abstract class ProverStdIO(uniqueId: String,
   protected def retryArgs(args: Option[String], retry: Int): Option[String] = args
 
   private def assertInMode(goal: String, timeout: Option[Int]): (Boolean, Long) = {
-    Verifier.config.assertionMode() match {
+    val profiling = isRetryableAttempt && retryPolicy.profile
+    val before = if (profiling) statistics().toString else ""
+    val start = if (profiling) System.nanoTime() else 0L
+    val result = Verifier.config.assertionMode() match {
       case Config.AssertionMode.SoftConstraints => assertUsingSoftConstraints(goal, timeout)
       case Config.AssertionMode.PushPop => assertUsingPushPop(goal, timeout)
     }
+    if (profiling && !lastCheckRanOutOfMemory) {
+      val totalMs = (System.nanoTime() - start) / 1000000.0
+      val after = statistics().toString
+      val msg = s"Retry first profile: check ${result._2} ms, total $totalMs ms, answer $lastCheckSatAnswer, " +
+        s"limit ${!result._1 && lastCheckReachedTimeout}, before $before, after $after"
+      reporter report InternalWarningMessage(msg)
+      logger info msg
+    }
+    result
   }
 
   /* Records whether the prover gave up on a failed first attempt because of its timeout */

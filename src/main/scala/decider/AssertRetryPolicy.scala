@@ -14,14 +14,28 @@ import java.util.Properties
   *   -Dsilicon.exp.retryFinal=bounded      bound the retry at [[ProverStdIO.RetryTimeoutFactor]] times the first
   *                                         attempt's timeout (default: unbounded)
   *   -Dsilicon.exp.contradictionSkip=false always query the prover in [[Decider.check]]
+  *   -Dsilicon.exp.retryFirstTimeout=800  first-attempt resource budget in equivalent milliseconds
+  *   -Dsilicon.exp.retryFirstWall=2000    additionally bound the first attempt by wall milliseconds (Z3 rlimit mode)
+  *   -Dsilicon.exp.retryProfile=true      report first-attempt timing and solver statistics
   */
-final case class AssertRetryPolicy(newSeed: Boolean, boundedFinal: Boolean, contradictionSkip: Boolean)
+final case class AssertRetryPolicy(newSeed: Boolean, boundedFinal: Boolean, contradictionSkip: Boolean,
+                                   firstTimeout: Option[Int] = None, firstWall: Int = 0, profile: Boolean = false)
 
 object AssertRetryPolicy {
   def fromProperties(properties: Properties): AssertRetryPolicy = AssertRetryPolicy(
     newSeed = "new".equals(properties.getProperty("silicon.exp.retrySeed")),
     boundedFinal = "bounded".equals(properties.getProperty("silicon.exp.retryFinal")),
-    contradictionSkip = !"false".equals(properties.getProperty("silicon.exp.contradictionSkip")))
+    contradictionSkip = !"false".equals(properties.getProperty("silicon.exp.contradictionSkip")),
+    firstTimeout = positiveInt(properties, "silicon.exp.retryFirstTimeout"),
+    firstWall = positiveInt(properties, "silicon.exp.retryFirstWall").getOrElse(0),
+    profile = "true".equals(properties.getProperty("silicon.exp.retryProfile")))
+
+  private def positiveInt(properties: Properties, name: String): Option[Int] =
+    Option(properties.getProperty(name)).map { value =>
+      val parsed = value.toInt
+      require(parsed > 0, s"$name must be positive")
+      parsed
+    }
 
   val default: AssertRetryPolicy = AssertRetryPolicy(newSeed = false, boundedFinal = false, contradictionSkip = true)
 

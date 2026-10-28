@@ -348,7 +348,7 @@ Revised 2026-10-27 from the seeded data (section 14). Ordered roughly by measure
 3. **Done 2026-10-27: the sequence-distinctness rewrite is on by default** (14.5): fixes the worst suite lottery (linked-list-qp-append); fires in 12 of 62 checked files; corpus-neutral. Needs a default-on suite run and a decision, not more corpus time.
 4. **Done 2026-10-28: sharing precheck (e544f5f9/a696fba7)** isolated on top of the Store fix and landed; measurements and gates in 5.2.
 5. **Silver frontend allocation fix (bda9a9da)** via a gitlink bump (14.7).
-6. **E's remaining costs** (14.3): bound the first attempt by wall time as well as rlimit (list-buggy first attempts take 37-80 s), and decide whether failing files near the timeout may be 1.3x slower.
+6. **E's remaining costs** (14.3, 14.12): global first-attempt cuts are rejected. A 2 s wall cap helps list-buggy but makes quick.pvl 7.20x slower; 8M rlimit makes selection 4.81x slower. Keep the default budget; target the instantiation-heavy searches instead.
 7. **QP inverse-function axiom triggers** (14.7, item7): `{down(r)}` on invOfFct/fctOfInv loops on FencesDblMsgPassAcqRewrite; dropping it in a replay finishes the stalled push in 25 s. Same matcher as the aux filter.
 8. **Seq index axioms in Silicon's prelude** (14.4, 14.9): W50 (needs atomic/auction/testTranspose checks), one-round reverse axioms (needs translator-tagged index terms), narrow no-reassume (needs a6fb554a gated). The same axioms are culprits in binary_search_tree, ASSSP, ABFS, timsort1 and pair_insertion_sort.
 9. **Reborrow change** (14.6): fix the flag name and drop the unmeasured Option B, then decide default-on. Corpus 0.969 wall, outcome-safe on 1,612 runs.
@@ -459,6 +459,30 @@ Main with all of the above vs the original 572cf2c8 (`impact-20261027`, T2, ≥3
 - D's extra failures are 4 Rea files on every seed where the other arms time out (upstream also times out). Three report errors with no ExpectedOutput (`0_harris-list.vpr@84`, `1_reverse.vpr@47`, `0_ring-insert-client-closed-u.vpr@53`); only `3_ring-insert-client-failing-alpha-gamma.vpr@63` is the expected error. The bounded retry turned search into unexpected errors.
 - The "1500 ms" first attempt is an rlimit (15M) and takes 4-7 s wall on these files; bounded retries ran 10-43 s wall.
 - Decision: default to same seed and an unbounded retry (SU). The retry stays (A0 loses 0_append on 2 seeds and is 1.34x slower); the new seed gains nothing; the bound only produces unexpected errors. `-Dsilicon.exp.retrySeed=new` and `-Dsilicon.exp.retryFinal=bounded` keep the old behaviour.
+
+### 14.12 First-attempt cost, 2026-10-28
+
+- Decision: keep the default first-attempt budget. Both cheaper policies introduce large regressions, so neither meets the no-file-slower gate. Main already avoids retrying definite answers: successful assertions return immediately, and failed assertions retry only on a resource/timeout/cancellation reason.
+- Setup: main `76810ca5`, JDK 21.0.10, Z3 4.16.0, the 40-file retry set from 14.11, seeds 0–3, four warm lanes on CPUs 0–7. File/arm/seed tasks are shuffled and interleaved; another worker uses CPUs 8–15. Each run has a 300 s cap and Z3 `memory_max_size=3000`; all scopes are in `silicon.slice` (40 GiB aggregate cap). Runs took place during daytime. Each JVM `-D` is a separate argument. Data and reproduction scripts: `~/data/viper-corpus-results/retry-first-20261028/` (`run.sh`, `paired/`, `profile2/`, `analysis.json`, `profile-analysis.json`).
+- Arms: M is main; R8 uses `-Dsilicon.exp.retryFirstTimeout=800` (8M resource units); W2 uses `-Dsilicon.exp.retryFirstWall=2000` (15M resource units plus 2 s Z3 timeout). Both keep the same-seed, unbounded final retry. R8 remains resource-deterministic; W2's cutoff depends on machine load and can change later search state.
+- Outcomes on the 40 files (160 runs/arm): M 37 verified / 61 failed / 62 timeout; R8 40/64/56; W2 40/63/57. No previously completed run becomes a timeout or loses verification, and diagnostics match wherever both runs complete. Extra completions include seed-sensitive WireGuard files; these are observations, not guaranteed gains. The geometric mean of per-file median candidate/main ratios over the 22 files that finish with matching outcomes on all four seeds, including noisy files, is R8 wall **1.307**, solver **1.289**; W2 wall **0.996**, solver **0.993**. Timeout files are excluded from those ratios, not credited as fast results.
+
+  | File (median wall seconds, four seeds) | M | R8 | W2 |
+  |---|---:|---:|---:|
+  | Flo/acyclic/list-buggy | 71.49 | 37.09 | 19.40 |
+  | Flo/acyclic/list | 136.92 | 91.13 | 91.65 |
+  | Flo/acyclic/dll-buggy | 229.92 | 255.81 | 221.64 |
+  | VeC permutations/quick | 9.79 | 72.51 | 70.47 |
+  | VeC permutations/selection | 6.12 | 29.44 | 5.56 |
+  | VeC PrefixSum/Blelloch | 57.70 | 50.90 | 111.39 |
+  | Rea 0_append | 76.18 | 69.04 | 53.60 |
+  | Go pair_insertion_sort | 31.42 | 25.31 | 31.32 |
+
+- Mechanism of the regressions: smaller cuts also interrupt assertions that main finishes cheaply. On quick seeds 1 and 2, both cuts restart into a search that reaches Z3's 3 GB memory limit after 105–149 s. R8 also makes timsort1/2 4.57x/3.88x slower. Saving the first attempt can cost much more in the final retry. Dijkstra-buggy still times out on all W2 seeds (R8 finishes one); acyclic/dll still times out on all seeds in every arm.
+- Phase diagnosis, separate from the timing comparison: `-Dsilicon.exp.retryProfile=true` records check-sat time, surrounding assertion work, and before/after Z3 statistics. Five slow failing files, seeds 0 and 2, yield 54 completed exhausted first attempts: **464.740 s check-sat**, **2.687 s surrounding work**, **4.838 s restart/replay**. A timeout may truncate an unreported attempt. Thus the cost is in solver search, not pipe traffic or replay. Resource deltas are 15.004–15.469M including setup/cleanup, while individual check-sats take 4.0–58.1 s. A resource unit does not bound the time of the operation it counts.
+- Flo/list-buggy seed 2: 58.130 s check-sat, 36.7 ms surrounding work, 105 ms restart/replay, 15.013M resources; the check adds 373,710 quantifier instantiations, 750,542 Boolean variables and 20,289 arithmetic pivots, ending at 742 MB Z3 memory. This is instantiation-heavy search (the inverse-axiom matching loop is diagnosed in 14.9), not a 1.5 s wall budget. These counters do not assign CPU time among matching, arithmetic and allocation; an additional `perf record` attempt was denied by the host's performance-monitoring permissions.
+- Guards: 0_append and pair_insertion_sort verify on all four seeds in every arm. The actual suite `wands/examples_paper/list_insert.vpr` also verifies 4/4 in each arm (`guards/`). The paired manifest additionally contains the ignored `list_insert_tmp.vpr`; its 12 runs are excluded from the 40-file statistics above. Full Silicon suite after rebasing onto `25bd5479`, with the requested `Z3_EXE`: 1,577 passed, 0 failed, 62 canceled, 54 ignored (`suite-final.log`). Wall/reset and final-retry-budget invariants have regression guards in `ProverMemoryOutTests`.
+- Recommendation: leave global cuts experimental. Fix or selectively constrain the expensive quantified searches; evaluate any narrower policy against quick, selection, timsort, Blelloch and the three retained-win guards before proposing a default.
 
 ### 14.10 Open issues found in this run
 

@@ -216,6 +216,32 @@ class ProverMemoryOutTests extends AnyFunSuite {
     }
   }
 
+  test("An experimental first resource budget does not bound the final retry") {
+    withProver(new FailingProver(AssertRetryPolicy.default.copy(firstTimeout = Some(800)))) { prover =>
+      retryTimingOut(prover)
+      assert(retryRlimits(prover) == Seq(8000000L, 0L))
+    }
+  }
+
+  test("The experimental wall bound is cleared for the final retry") {
+    withProver(new FailingProver(AssertRetryPolicy.default.copy(firstWall = 2000))) { prover =>
+      retryTimingOut(prover)
+      val checks = prover.sent.zipWithIndex.collect { case ("(check-sat)", i) => i }
+      assert(prover.sent.take(checks.head).contains("(set-option :timeout 2000)"))
+      assert(prover.sent.slice(checks.head + 1, checks.last).contains("(set-option :timeout 0)"))
+    }
+  }
+
+  test("The experimental wall bound is cleared after a definite answer without a restart") {
+    withProver(new FailingProver(AssertRetryPolicy.default.copy(firstWall = 2000))) { prover =>
+      assert(prover.assert("true", None))
+      assert(prover.starts == 1)
+      prover.sent = Vector.empty
+      prover.check(None)
+      assert(prover.sent.contains("(set-option :timeout 0)"))
+    }
+  }
+
   test("A retry uses the arguments of the first attempt by default") {
     withProver(new FailingProver(AssertRetryPolicy.default)) { prover =>
       retryTimingOut(prover)
@@ -235,6 +261,10 @@ class ProverMemoryOutTests extends AnyFunSuite {
                   "silicon.exp.contradictionSkip" -> "false") ==
       AssertRetryPolicy(newSeed = true, boundedFinal = true, contradictionSkip = false))
     assert(policy("silicon.exp.retrySeed" -> "same", "silicon.exp.retryFinal" -> "unbounded") == policy())
+    assert(policy("silicon.exp.retryFirstTimeout" -> "800", "silicon.exp.retryFirstWall" -> "2000",
+                  "silicon.exp.retryProfile" -> "true") ==
+      AssertRetryPolicy.default.copy(firstTimeout = Some(800), firstWall = 2000, profile = true))
+    intercept[IllegalArgumentException] { policy("silicon.exp.retryFirstTimeout" -> "0") }
   }
 
   test("A retry seed differs from the seed of the first attempt") {
