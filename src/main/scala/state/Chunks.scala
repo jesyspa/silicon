@@ -40,6 +40,11 @@ case class BasicChunk(resourceID: BaseID,
                       tag: Option[Int])
     extends NonQuantifiedChunk {
 
+  /** The constructor from before `tag` was added, kept for Java and Kotlin callers. */
+  def this(resourceID: BaseID, id: BasicChunkIdentifier, args: Seq[Term], argsExp: Option[Seq[ast.Exp]], snap: Term,
+           snapExp: Option[ast.Exp], perm: Term, permExp: Option[ast.Exp]) =
+    this(resourceID, id, args, argsExp, snap, snapExp, perm, permExp, None)
+
   require(perm.sort == sorts.Perm, s"Permissions $perm must be of sort Perm, but found ${perm.sort}")
   resourceID match {
     case FieldID => require(snap.sort != sorts.Snap, s"A field chunk's value ($snap) is not expected to be of sort Snap")

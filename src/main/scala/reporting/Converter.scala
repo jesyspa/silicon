@@ -258,7 +258,7 @@ object Converter {
     * counterexample machinery; it handles snapshots, function applications, boolean connectives,
     * comparisons, collection membership, and permission arithmetic.
     */
-  def evaluateTerm(term: Term, model: Model, env: Map[Var, ExtractedModelEntry] = Map.empty): ExtractedModelEntry = {
+  def evaluateTerm(term: Term, model: Model, env: Map[Var, ExtractedModelEntry]): ExtractedModelEntry = {
     term match {
       case Unit              => UnprocessedModelEntry(ConstantEntry(snapUnitId))
       case IntLiteral(x)     => LitIntEntry(x)
@@ -437,6 +437,9 @@ object Converter {
       case _ => OtherEntry(term.toString, "unhandled")
     }
   }
+
+  /** An overload rather than a default argument, so that Java and Kotlin callers keep the two-argument form. */
+  def evaluateTerm(term: Term, model: Model): ExtractedModelEntry = evaluateTerm(term, model, Map.empty)
 
   private def euclideanMod(a: BigInt, b: BigInt): BigInt = { val r = a % b; if (r < 0) r + b.abs else r }
   private def euclideanDiv(a: BigInt, b: BigInt): BigInt = (a - euclideanMod(a, b)) / b
