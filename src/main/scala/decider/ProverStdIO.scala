@@ -313,10 +313,10 @@ abstract class ProverStdIO(uniqueId: String,
     val (result, duration) =
       if (timeout.isEmpty && Verifier.config.proverTimeout == 0 && retryTimeout > 0) {
         /* Z3's search depends on the queries that preceded it in the same prover and on its random seed.
-         * An assertion that it does not prove quickly is retried in a fresh prover with the same
-         * state and a different seed, with a timeout of RetryTimeoutFactor times that of the first attempt. If the
-         * retry reaches that timeout, the assertion fails. [[AssertRetryPolicy]] can keep the seed or drop the
-         * retry's timeout.
+         * An assertion that it does not prove quickly is retried, without a timeout, in a fresh prover with the
+         * same state and seed. A bounded retry fails assertions that an unbounded search would prove, and a new
+         * seed gained nothing in the 2026-10-28 ablation (docs/perf/ideas.md); [[AssertRetryPolicy]] can still
+         * select both.
          */
         isRetryableAttempt = true
         val (firstResult, firstDuration) =

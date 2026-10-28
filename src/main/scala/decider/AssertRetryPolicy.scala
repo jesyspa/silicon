@@ -10,18 +10,20 @@ import java.util.Properties
 
 /** Experimental switches for ablating the contradiction skip and the fresh-prover retry. The defaults are
   * the normal behaviour:
-  *   -Dsilicon.exp.retrySeed=same          retry with the seed of the first attempt (default: new)
-  *   -Dsilicon.exp.retryFinal=unbounded    retry without a timeout (default: bounded, see
-  *                                         [[ProverStdIO.RetryTimeoutFactor]])
+  *   -Dsilicon.exp.retrySeed=new           retry with a seed that differs from the first attempt's (default: same)
+  *   -Dsilicon.exp.retryFinal=bounded      bound the retry at [[ProverStdIO.RetryTimeoutFactor]] times the first
+  *                                         attempt's timeout (default: unbounded)
   *   -Dsilicon.exp.contradictionSkip=false always query the prover in [[Decider.check]]
   */
 final case class AssertRetryPolicy(newSeed: Boolean, boundedFinal: Boolean, contradictionSkip: Boolean)
 
 object AssertRetryPolicy {
   def fromProperties(properties: Properties): AssertRetryPolicy = AssertRetryPolicy(
-    newSeed = !"same".equals(properties.getProperty("silicon.exp.retrySeed")),
-    boundedFinal = !"unbounded".equals(properties.getProperty("silicon.exp.retryFinal")),
+    newSeed = "new".equals(properties.getProperty("silicon.exp.retrySeed")),
+    boundedFinal = "bounded".equals(properties.getProperty("silicon.exp.retryFinal")),
     contradictionSkip = !"false".equals(properties.getProperty("silicon.exp.contradictionSkip")))
+
+  val default: AssertRetryPolicy = AssertRetryPolicy(newSeed = false, boundedFinal = false, contradictionSkip = true)
 
   /* Read when a prover or decider is created */
   def current: AssertRetryPolicy = fromProperties(System.getProperties)

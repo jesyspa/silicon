@@ -48,7 +48,7 @@ class ProverMemoryOutTests extends AnyFunSuite {
   /* A Z3 prover that answers the commands in [[failOn]] with a memory-out, and the commands in [[replace]]
    * with the given answers, after processing them
    */
-  private class FailingProver(policy: AssertRetryPolicy = AssertRetryPolicy(true, true, true))
+  private class FailingProver(policy: AssertRetryPolicy = AssertRetryPolicy(newSeed = true, boundedFinal = true, contradictionSkip = true))
     extends Z3ProverStdIO("memoryOut", new TermToSMTLib2Converter,
                                                     new DefaultIdentifierFactory("memoryOut"), NoopReporter) {
     var failOn: List[String] = Nil
@@ -200,7 +200,7 @@ class ProverMemoryOutTests extends AnyFunSuite {
       case (state, _) => state
     }._2
 
-  test("A retry is bounded at a multiple of the first attempt's timeout by default") {
+  test("-Dsilicon.exp.retryFinal=bounded bounds a retry at a multiple of the first attempt's timeout") {
     withProver { prover =>
       retryTimingOut(prover)
       val limits = retryRlimits(prover)
@@ -208,16 +208,16 @@ class ProverMemoryOutTests extends AnyFunSuite {
     }
   }
 
-  test("-Dsilicon.exp.retryFinal=unbounded retries without a timeout") {
-    withProver(new FailingProver(AssertRetryPolicy(newSeed = true, boundedFinal = false, contradictionSkip = true))) { prover =>
+  test("A retry has no timeout by default") {
+    withProver(new FailingProver(AssertRetryPolicy.default)) { prover =>
       retryTimingOut(prover)
       val limits = retryRlimits(prover)
       assert(limits.length == 2 && limits(0) > 0 && limits(1) == 0)
     }
   }
 
-  test("-Dsilicon.exp.retrySeed=same retries with the arguments of the first attempt") {
-    withProver(new FailingProver(AssertRetryPolicy(newSeed = false, boundedFinal = true, contradictionSkip = true))) { prover =>
+  test("A retry uses the arguments of the first attempt by default") {
+    withProver(new FailingProver(AssertRetryPolicy.default)) { prover =>
       retryTimingOut(prover)
       assert(prover.startArgs == List(None, None))
     }
@@ -229,11 +229,12 @@ class ProverMemoryOutTests extends AnyFunSuite {
       settings.foreach { case (k, v) => properties.setProperty(k, v) }
       AssertRetryPolicy.fromProperties(properties)
     }
-    assert(policy() == AssertRetryPolicy(newSeed = true, boundedFinal = true, contradictionSkip = true))
-    assert(policy("silicon.exp.retrySeed" -> "same", "silicon.exp.retryFinal" -> "unbounded",
+    assert(policy() == AssertRetryPolicy.default)
+    assert(policy() == AssertRetryPolicy(newSeed = false, boundedFinal = false, contradictionSkip = true))
+    assert(policy("silicon.exp.retrySeed" -> "new", "silicon.exp.retryFinal" -> "bounded",
                   "silicon.exp.contradictionSkip" -> "false") ==
-      AssertRetryPolicy(newSeed = false, boundedFinal = false, contradictionSkip = false))
-    assert(policy("silicon.exp.retrySeed" -> "new", "silicon.exp.retryFinal" -> "bounded") == policy())
+      AssertRetryPolicy(newSeed = true, boundedFinal = true, contradictionSkip = false))
+    assert(policy("silicon.exp.retrySeed" -> "same", "silicon.exp.retryFinal" -> "unbounded") == policy())
   }
 
   test("A retry seed differs from the seed of the first attempt") {

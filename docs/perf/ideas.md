@@ -443,6 +443,14 @@ Main with all of the above vs the original 572cf2c8 (`impact-20261027`, T2, ≥3
 - 10 slowest stable-timeout files (one run each, diagnoses only): loops in 4. In binary_search_tree, ASSSP and ABFS the Seq index axioms (append_index2/3, drop_index2) are among the culprits; mergeDAG is Set_subset_def plus reachability-preamble quantifiers. dijkstra, FollyRWSpinlockStronger and the ring-insert clients are shallow mass instantiation (generation 9-34), not loops.
 - Correction: mloop called FencesDblMsgPassAcqRewrite "not a Z3 problem" because check-sats total 0.81 s. item7 found the time in Z3 processing a `push` after QP inverse axioms (a loop between `{down(r)}` triggers). cfg's per-command timing (d47170a1) now reports non-check-sat time; use it before calling a stall non-Z3.
 
+### 14.11 Retry policy ablation, 2026-10-28
+- Setup: one jar (f929b360), 40 files (34 where retries fired in the impact run, plus 6 failing files over 100 s), 4 seeds, 4 lanes, caps as in the impact runs. Arms: A0 skip without retry (`--assertRetryTimeout 0`); SU same seed, unbounded retry; NU new seed, unbounded retry; D new seed, retry bounded at 4x (the default before this entry). Data: `~/data/viper-corpus-results/ablation-retry-20261028/run`.
+- Outcomes (160 runs each): A0 34 verified / 70 failed / 50 timeout / 6 capped; SU 38/73/49/0; NU 37/72/51/0; D 37/89/34/0.
+- Wall on files with identical complete outcomes, vs D: A0 1.34 [1.11, 1.65] (n=15); SU 1.01 [0.97, 1.06] (n=24); NU 1.05 [1.02, 1.10] (n=23). SU/NU 0.96 [0.91, 1.01]. Restart and replay cost 41-54 s per arm in total.
+- D's extra failures are 4 Rea files on every seed where the other arms time out (upstream also times out). Three report errors with no ExpectedOutput (`0_harris-list.vpr@84`, `1_reverse.vpr@47`, `0_ring-insert-client-closed-u.vpr@53`); only `3_ring-insert-client-failing-alpha-gamma.vpr@63` is the expected error. The bounded retry turned search into unexpected errors.
+- The "1500 ms" first attempt is an rlimit (15M) and takes 4-7 s wall on these files; bounded retries ran 10-43 s wall.
+- Decision: default to same seed and an unbounded retry (SU). The retry stays (A0 loses 0_append on 2 seeds and is 1.34x slower); the new seed gains nothing; the bound only produces unexpected errors. `-Dsilicon.exp.retrySeed=new` and `-Dsilicon.exp.retryFinal=bounded` keep the old behaviour.
+
 ### 14.10 Open issues found in this run
 
 - 7e42b83e's message says `-Dsilicon.exp.exactReborrow=true`, but the code reads `silicon.proto.minSimp` and also contains an unmeasured Option B (`silicon.proto.permMacro`) and a "PROTOTYPE" comment. The impact run passed the documented name, so its N arm ran without the reborrow change.
