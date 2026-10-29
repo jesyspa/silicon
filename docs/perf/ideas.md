@@ -539,6 +539,43 @@ Warm JVM (JDK 21, Z3 4.16.0, 16 cores, desktop host with background load; round-
 
 Launcher-only follow-up to §§13 and 15: [measurements and enablement commands](fresh-jvm-cache.md). On main `ae1d99dc`, six small/medium files × six fresh-JVM repetitions: JDK 21 AppCDS/default wall 0.736 [0.584, 0.928]; JDK 25 AOT/JDK 25 default 0.580 [0.503, 0.668]. Four alternating SnaKt pairs on JDK 25 show no established gain: summed JUnit 1.070 [0.672, 1.703], command wall 0.972 [0.568, 1.663]. Training inputs were disjoint from timed inputs; neither project's source changed. Recommend opt-in CLI documentation, not default-on flags or test-build integration.
 
+## 17. Store-lookup DaG/Rea follow-up, 2026-10-29
+
+The evening DaG/Rea slowdowns are not a reproducible, host-independent cost of store lookup. DaG retains a smaller slowdown in two feanor runs, but six independent warmed-JVM replications on oliphaunt give S/U near 1 in both groups. Identical-JAR A/A variation is larger than those estimates. Solver input is unchanged. No source fix was justified or implemented; the precise cause of the residual feanor DaG effect remains unresolved.
+
+### Replication and uncertainty
+
+U is `ff386aec`; S is U plus `980151d5`; A is a separate JVM using the exact U JAR. ZIP-entry comparison finds only `MapBackedStore.class` and build metadata different between U and S. Each replication measures seeds 0–7, alternating adjacent U/S order and rotating A around the pair. Files are shuffled independently per replication. One verifier, 4 GiB heap, 3 GB Z3 cap, 7 GiB runner scopes, profile-derived caps, chap08 warm-up and per-runner priming below 10 s match the evening method. All runs finished during daytime.
+
+Only the 14 DaG/Rea files that completed in the evening were rerun; the eight timeout/crash files cannot explain its completed-file ratios and were not retimed. Every measured outcome matches across arms and seeds. The table uses the original seven DaG/five Rea files, not a newly selected favorable cohort. Ratios are candidate/control; below 1 is faster.
+
+| Host / independent JVM batches | Group | S/U [95% CI] | A/U [95% CI] | Files |
+|---|---|---|---|---:|
+| feanor, first eight-seed batch | DaG | 1.049 [1.024, 1.072] | 0.977 [0.958, 0.995] | 7 |
+| feanor, new JVMs with SMT logging | DaG | 1.042 [1.019, 1.062] | 0.996 [0.974, 1.016] | 7 |
+| feanor, first batch | Rea | 1.065 [0.999, 1.138] | 0.943 [0.912, 0.982] | 5 |
+| feanor, logged batch | Rea | 1.021 [0.963, 1.083] | 1.078 [1.039, 1.118] | 4 |
+| oliphaunt, six independent batches | DaG | 1.012 [0.984, 1.040] | 1.053 [1.006, 1.102] | 7 |
+| oliphaunt, six independent batches | Rea | 1.008 [0.977, 1.040] | 1.067 [1.013, 1.124] | 5 |
+
+Feanor intervals follow the evening method: medians over seeds, equal-file geometric mean, 10,000 file-bootstrap resamples, excluding max/min >2 in any arm. The logged Rea batch excludes fnext_reach under that rule. These intervals do not capture independent-JVM variability.
+
+Oliphaunt intervals instead use Student-t, df=5, over the six independent batches' group log ratios, retaining the fixed original cohort and matching completed outcomes. Each batch starts three new JVMs and takes per-file medians over eight seeds. A crossed bootstrap over batches and files gives S/U intervals [0.991, 1.036] for DaG and [0.973, 1.045] for Rea. Including all eight completing DaG/six Rea files gives 1.015 [0.988, 1.044] and 1.018 [0.993, 1.043] with the JVM-t method.
+
+Within oliphaunt, A/U ranges from 0.988–1.088 for DaG and 1.017–1.150 for Rea across batches. S/A is 0.961 [0.910, 1.014] and 0.945 [0.879, 1.016]. Thus the conclusion depends strongly on which identical control JVM is used; more seeds in one JVM do not resolve that uncertainty. This does not prove exact neutrality or rule out a small platform-specific effect.
+
+Oliphaunt uses Temurin 21.0.13 / Z3 4.16.0 on P-core SMT siblings 2,3; feanor uses Temurin 21.0.10 / Z3 4.16.0. No ratios combine hosts. Oliphaunt batches 2–3 overlapped an unpinned Gradle test from about 15:10–15:19 and were discarded wholesale, including warm-up state. Batches 6–7 replace them; the retained set is 0,1,4,5,6,7. Later Gradle work was pinned to 4–11, so shared package/memory effects remain a limitation. The feanor priority corpus run was not interrupted.
+
+### Profiling and cause
+
+JFR on feanor covers chap01 and Rea 0_Tree-add-sibling, 32 seeds per file/arm after warm-up. It reproduces a local S slowdown: seed-median wall U→S is 0.215→0.230 s and 0.353→0.445 s. The profile points away from extra store work: only one of 2,504 Java execution samples across U/S/A contains a store frame. Parsing/name analysis and AST traversal dominate; sampled allocation weights total approximately 20.90/20.92/21.47 GB for U/S/A. Those are whole-recording sampling estimates, not precise per-request allocation counters.
+
+The separate eight-seed logging run compares both prover streams for every file: all 448 U–S/U–A log comparisons match after removing whole-line comments (timestamps, build IDs, responses and timings); command text and order are retained. DaG solver CPU S/U is 0.999 [0.984, 1.019]. Rea's failed files have too little measured solver CPU for useful ratios.
+
+The evidence establishes a JVM-side, frontend-dominated timing difference in the profiled feanor processes, not changed Z3 search or a hot store-lookup operation. JIT/profile history is a plausible explanation for the JVM-to-JVM variation, but no controlled JIT ablation completed, so it is not a demonstrated mechanism. Do not change the small lookup patch merely to chase this noise, or advertise the evening 7.6%/10.6% group losses as an intrinsic patch cost. A remaining feanor-only DaG investigation would need independent JVM replications on that host and phase/JIT controls, rather than additional seeds alone.
+
+Evidence and reproduction: `~/data/viper-corpus-results/dagrea-20261029/` contains `replication/` (paired adapter, launcher, eight-seed data, `original-cohort.json`), `logged/` (second launcher, logs, comparator and results), `profile/` (JFRs and summaries), `oliphaunt-run.sh`, `oliphaunt-replacements.sh`, `analyze-jvms.py`, and `oliphaunt-6jvm/` (copied raw runs, exclusions and analysis). The remote runs also remain at the same data-directory path on oliphaunt. No experimental source change was landed.
+
 ## 12. Source index
 
 - Section 14: stage reports in `/opt/bots/log/workflow-runs/run-1792927685-e7215b-artifacts/.workflow-run/`; data directories listed at the top of section 14.
