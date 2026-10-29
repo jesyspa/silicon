@@ -1,10 +1,19 @@
 # Silicon fork: results and first upstream proposal
 
-28 October 2026. The `jesyspa/silicon` fork reduces avoidable JVM work, bounds verifier-pool startup by the program's parallelism, and recovers from Z3 memory-outs. Propose the store-lookup fix first: it is a small local change that preserves solver input and applies independently to upstream head. The fresh-prover retry has a known regression and is not a candidate for that proposal.
+28 October 2026, updated 29 October. The `jesyspa/silicon` fork reduces avoidable JVM work, bounds verifier-pool startup by the program's parallelism, and recovers from Z3 memory-outs. Propose the store-lookup fix first: it is a small local change that preserves solver input and applies independently to upstream head. The fresh-prover retry has a known regression and is not a candidate for that proposal.
 
 ## Measurements
 
 Time ratios are candidate/control; below 1 is faster. The evening and client comparisons use upstream as control; isolated changes use their stated parent build. Intervals are 95% confidence intervals, with the method specified for each experiment. These are workload-specific results, not a universal speedup.
+
+Current fork, 29 October daytime run (3,351 requests; same corpus, lanes, caps and priming as below, with eight seeds for files profiled below 10 s and four otherwise): U = upstream head `ff386aec`, F = fork `45397fd7` with fresh-prover retry off (its default), P = fork `f929b360` from 27 October with retry on. Both fork arms also enable the opt-in `silicon.exp.seqDistinctInverse` and `silicon.exp.exactReborrow` switches, which the plain jar leaves off.
+
+| Time ratio | F/U | P/U | Stable files |
+|---|---|---|---:|
+| Wall, all eligible files | 0.801 [0.769, 0.830] | 0.816 [0.788, 0.844] | 178 / 177 |
+| Total process CPU | 0.832 [0.787, 0.875] | 0.840 [0.799, 0.882] | 128 / 127 |
+
+Turning the retry off did not cost speed. U crashes on 53 requests; neither fork arm crashes. Per-file medians across seeds, unstable files (max/min > 2) excluded, percentile bootstrap over files. Analysis: `~/data/viper-corpus-results/nightly/2026-10-29/analysis.txt`.
 
 Evening comparison, completed at about 22:40 CET (all 1,500 requests): U = upstream head `ff386aec`, F = fork `46695469` with its then-default fresh-prover retry, S = U plus only store lookup `980151d5`.
 
@@ -40,7 +49,7 @@ Per-group wall ratios (same method; unadjusted intervals, no multiple-comparison
 | Viper examples (Vi) | 0.724 [0.637, 0.822] | 0.983 [0.916, 1.054] | 14 |
 | VOILA, typecheck only (Vo) | 0.971 [0.871, 1.084] | 0.980 [0.895, 1.084] | 14 |
 
-F uses about 19% less wall time on retained files. The S result supports a modest store-lookup gain, not a universal improvement: Dafny/Gobra and reachability groups are slower here. That qualifies, rather than overturns, the first-proposal recommendation. S and U have identical outcome classifications on all 500 paired requests, including 16 crashes each; F has zero crashes. F verifies 251 requests versus U's 247, but also has 31 timeouts versus U's 29. These are not claims of uniform completeness improvement.
+F uses about 19% less wall time on retained files. The S result supports a modest store-lookup gain, not a universal improvement: Dafny/Gobra and reachability groups are slower here. A 29 October replication ([ideas.md §17](ideas.md)) does not reproduce those losses beyond JVM variation on a second host (DaG 1.012 [0.984, 1.040], Rea 1.008 [0.977, 1.040]), finds no hot store lookup in JFR profiles and identical solver logs in all 448 comparisons; a 4–5% DaG slowdown remains on this desktop with no identified mechanism. That qualifies, rather than overturns, the first-proposal recommendation. S and U have identical outcome classifications on all 500 paired requests, including 16 crashes each; F has zero crashes. F verifies 251 requests versus U's 247, but also has 31 timeouts versus U's 29. These are not claims of uniform completeness improvement.
 
 Independent client measurements provide context:
 
@@ -69,7 +78,7 @@ Sizes are source insertions/deletions, excluding tests and tooling; multi-commit
 
 Matching test results are evidence, not a proof of soundness. The older upstream/fork comparison had matching outcomes on 376 Prusti tests and 1,643 common Silicon tests. The sharing-precheck gate passed 1,574 Silicon tests; startup/preamble changes have command-order and original-exception regression guards. SnaKt gives 141 passed / 1 failed in every run: its existential-postcondition expected error is absent on both pinned upstream and fork under Z3 4.16, so that failure is not fork-specific.
 
-There is a known fork regression outside those suites: fresh-prover retry changes `scanSkipLast` in jormungandr's `arraydeque_bfs_negative` from a quick expected failure to a 300 s timeout under Z3 4.16. Retry is opt-in on main since `0d6c7e5f`; tonight's F artifact still enables it. Contradiction-check skipping remains enabled. The revised default passes 1,578 Silicon tests (0 failed, 62 canceled, 54 ignored), and disabling retry restores the expected jormungandr diagnostic. Do not equate tonight's F timings with the revised default build, or claim all client outcomes are unchanged. Separately, upstream's `model.partial=true` change (#940) omits unconstrained variables from counterexamples and changed one SnaKt-derived golden; distinguish model presentation from a verification verdict.
+There is a known fork regression outside those suites: fresh-prover retry changes `scanSkipLast` in jormungandr's `arraydeque_bfs_negative` from a quick expected failure to a 300 s timeout under Z3 4.16. Retry is opt-in on main since `0d6c7e5f`; the 28 October evening F artifact still enables it, the 29 October F arm does not. Contradiction-check skipping remains enabled. The revised default passes 1,578 Silicon tests (0 failed, 62 canceled, 54 ignored), and disabling retry restores the expected jormungandr diagnostic. Do not equate tonight's F timings with the revised default build, or claim all client outcomes are unchanged. Separately, upstream's `model.partial=true` change (#940) omits unconstrained variables from counterexamples and changed one SnaKt-derived golden; distinguish model presentation from a verification verdict.
 
 ## What to propose first
 
@@ -79,7 +88,7 @@ There is a known fork regression outside those suites: fresh-prover retry change
 
 ## Build and try
 
-Use JDK 21 and Z3 4.16.0. With that Z3 on PATH:
+A prebuilt `silicon.jar` of the 29 October F arm is attached to the `fork-2026-10-29` release on https://github.com/jesyspa/silicon/releases; run it with JDK 21 and Z3 4.16.0 as `java -jar silicon.jar --z3Exe "$(command -v z3)" example.vpr`. To build instead, with that Z3 on PATH:
 
 ```sh
 git clone --recursive --branch main https://github.com/jesyspa/silicon.git
@@ -89,6 +98,6 @@ sbt assembly
 java -jar target/scala-2.13/silicon.jar example.vpr
 ```
 
-Record the checked-out commit and Z3 version when comparing. For the smallest independent trial, apply only `980151d5` to upstream `ff386aec` and rebuild; this is tonight's S arm. No contact with viperproject is needed to reproduce these local comparisons.
+Record the checked-out commit and Z3 version when comparing. For the smallest independent trial, apply only `980151d5` to upstream `ff386aec` and rebuild; this is the 28 October S arm. No contact with viperproject is needed to reproduce these local comparisons.
 
 Evidence: [performance ledger](ideas.md), especially §§5.1–5.2, 14 and 15. Raw local artifacts: `~/data/viper-corpus-results/evening-20261028/` (`analysis.json`/`.txt` for the run; `summary-analysis.json`/`.txt` for groups, ≥5 s and CPU breakdowns; regenerate the latter with `python3 analyze-summary.py` in that directory), `snakt-20261028/REPORT.md`, `nightly/2026-10-27/analysis.txt`; older client/impact analyses under `impact-20261027/` and `suites-20261027/`. The older impact corpus result, 0.780 [0.751, 0.809], and nightly result, 0.813 [0.784, 0.842], used different fork snapshots and inclusion rules; neither substitutes for the isolated S comparison.
