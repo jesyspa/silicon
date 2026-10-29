@@ -1,6 +1,6 @@
 # Oliphaunt newcomer setup log
 
-29 October 2026, 14:35–15:05 CET. Operator account: `kameliya`, reached with `ssh oliphaunt`. Silicon builds and verifies its README example; SnaKt builds and passes all 171 tests. jormungandr builds, but its default test run has 595 passes and one golden-comparison failure. Private access initially failed; operator-approved key registration and an outbound firewall change resolved it. The corpus/harness transfer and U/S smoke task work. After the initial step-3 access failure, the dispatcher authorized step 4 before resuming jormungandr.
+29 October 2026, initial setup 14:35–15:05 CET; focused follow-up through 15:26 CET. Operator account: `kameliya`, reached with `ssh oliphaunt`. Silicon builds and verifies its README example; SnaKt builds and passes all 171 tests. jormungandr builds, but its default test run has 595 passes and one golden-comparison failure. Focused reruns show an intermittent backend rejection with documented Z3 4.8.7; both 4.8.7 and 4.16.0 can pass, so solver version alone does not explain the failure. Private access initially failed; operator-approved key registration and an outbound firewall change resolved it. The corpus/harness transfer and U/S smoke task work. After the initial step-3 access failure, the dispatcher authorized step 4 before resuming jormungandr.
 
 This setup session used no sudo, key/token transfer, system-tool replacement, upstream repository operation, or contact with Viper/JetBrains maintainers. The dispatcher separately arranged the operator-approved authentication/firewall changes described in step 3. Public clones use the `jesyspa` forks. Commands below ran on oliphaunt unless stated otherwise. Durations are wall seconds from `/usr/bin/time -p` unless marked approximate/unmeasured; they include cold dependency downloads, not just compilation. This is a setup exercise, not a performance comparison.
 
@@ -248,6 +248,71 @@ Build warnings concern deprecated Kotlin symbol APIs; test compilation warns abo
 
 Publishing jormungandr also writes the local Maven repository used by SnaKt. The 171-test public SnaKt result above was obtained before that publication; it was not rerun afterward.
 
+### Focused ArrayDeque follow-up: Z3 version is not a complete explanation
+
+The dispatcher requested a single-test comparison because the pinned Silicon artifact passes this case with Z3 4.16 on the source host. jormungandr's checked-out README explicitly expects **Z3 4.8.7**, including its automatic test download; 4.16.0 is a diagnostic alternative, not the documented requirement. Kept jormungandr at `442ff007…` with its own pinned dependencies, no Silicon-fork initialization.
+
+Created `/tmp/bot-run.ZBQRjRYFfW` for raw follow-up logs/diffs. The two initial filtered checks both passed:
+
+```sh
+source ~/.local/opt/benchmark-env.sh
+cd ~/dev/jormungandr
+export Z3_EXE=/usr/bin/z3
+./gradlew :formver.compiler-plugin:test \
+  --tests '*Targets$Arraydeque.testArrayDeque' --rerun-tasks
+export Z3_EXE="$HOME/.local/opt/z3-4.16.0-x64-glibc-2.39/bin/z3"
+./gradlew :formver.compiler-plugin:test \
+  --tests '*Targets$Arraydeque.testArrayDeque' --rerun-tasks --no-daemon
+```
+
+Each command was timed with `/usr/bin/time -p` and redirected to the scratch log listed below. Read `docs/agents-dev.md` (“Recovering the diff”, “Regenerating”) and its linked outcome-cache note. The initial full-suite XML retained only assertion names, not expected/actual values, because Gradle strips those values during serialization. Setting `SNAKT_TEST_DUMP_DIR` for subsequent checks produced no diff files (a passing check has no assertion diff; the first regeneration failure was an exception).
+
+To capture actual output, temporarily regenerated only this test's goldens. Created remote branch `setup/arraydeque-z3-check` before those writes. The ordinary regeneration guard refused an outcome change, so used its documented explicit opt-in, `-Pformver.recordOutcomes=true`, to collect the diff. Restored the golden directory immediately after every attempt:
+
+```sh
+# Z3_EXE selects /usr/bin/z3 or the user-local 4.16.0 binary as above.
+./gradlew :formver.compiler-plugin:test \
+  --tests '*Targets$Arraydeque.testArrayDeque' --rerun-tasks --no-daemon \
+  -Pkotlin.test.update.test.data=true -Pformver.recordOutcomes=true
+git diff --binary > /tmp/bot-run.ZBQRjRYFfW/record-VERSION.diff
+git restore --worktree -- formver.compiler-plugin/testData/diagnostics/targets/arraydeque
+```
+
+| Attempt / scratch log | Z3 | CPU affinity | Wall s | Result |
+|---|---|---|---:|---|
+| `z3-4.8.7.log`, ordinary check | 4.8.7 | 0–19 | 161.92 | Passed |
+| `z3-4.16.0.log`, ordinary check | 4.16.0 | 0–19 | 174.44 | Passed |
+| `regen-4.8.7.log`, regeneration without record-outcomes opt-in | 4.8.7 | 0–19 | 170.56 | Failed: `OutcomeChangeRefused`; no golden written |
+| `record-4.8.7.log`, opted-in regeneration | 4.8.7 | 0–19 | 168.16 | Failed; captured three-file diff, then restored |
+| `record-4.16.0.log`, opted-in regeneration | 4.16.0 | 4–11 | 180.07 | Passed; empty diff |
+| `record-4.8.7-pinned.log`, opted-in regeneration | 4.8.7 | 4–11 | 169.40 | Passed; empty diff |
+
+After the unpinned attempts, the dispatcher identified overlap with another session's benchmark CPUs 2–3 and directed remaining runs to P-cores 4–11. Both final commands therefore prefixed Gradle with `taskset -c 4-11` and used `--no-daemon`. The earlier runs were not isolated from that concurrent work. These timings are diagnostic, not benchmark results.
+
+The captured 4.8.7 diff (`record-4.8.7.diff`) consists of:
+
+- `ArrayDeque.kt`: wrap the existing `lastIndexOf` declaration in `<!INVALID_VIPER_PROGRAM!>…<!>` diagnostic markers; no executable implementation change.
+- `ArrayDeque.viper.diag.txt`: prepend this exact diagnostic and a blank line:
+
+```diff
++/ArrayDeque.kt: error: Invalid generated Viper program: Viper rejected the generated program: Interaction with prover (instance 01) failed: Interaction with prover yielded null. This might indicate that the prover crashed. [BACKEND_REJECTED_PROGRAM]
++
+```
+
+- `ArrayDeque.trust.txt`: change the summary and remove `lastIndexOf` from verified declarations:
+
+```diff
+-SnaKt verified 47 declarations; 5 rely on 5 distinct trusted assumptions (bundled spec: 1, @TrustedElementEquality: 4).
++SnaKt verified 46 declarations; 4 rely on 4 distinct trusted assumptions (bundled spec: 1, @TrustedElementEquality: 3).
+@@
+-  ArrayDeque.lastIndexOf
+-    @TrustedElementEquality: ArrayDeque.lastIndexOf(E): Int
+```
+
+The preceding guarded regeneration exposed the same `lastIndexOf: clean -> failed` outcome and backend-rejection text. This reproduces mismatches in the same three filenames as the original suite, but the original assertion values were lost, so byte-for-byte identity with that first failure cannot be established. The message suggests a solver crash; no solver exit status or crash cause was captured, so that remains a hypothesis.
+
+Conclusion: 4.8.7 intermittently loses a previously verified declaration; it also passes unchanged, including the final pinned run. Both 4.16.0 attempts pass. A simple “wrong Z3 version” explanation is unsupported, and the README-prescribed version can be flaky in this setup. More controlled repetitions/solver-exit capture would be needed to attribute the problem to Z3, concurrency, or frontend teardown. The shutdown cleanup exception also occurs in passing runs and is not itself a reliable test-failure signal. No goldens remain changed, and no private-repository commits were made.
+
 ## 4. Corpus and U/S task: works
 
 The dispatcher authorized proceeding out of order while it handled private access. Read the copied harness README and the repository's [harness.md](../../harness.md). These are external experiment scripts rather than a standalone installable package.
@@ -311,7 +376,7 @@ Portability friction: `paired.py` imports from an absolute `/home/kameliya/data/
 - Public HTTPS works without account setup. GitHub port-22 SSH initially hung, and private access additionally required key registration. Both access issues are now resolved; the initial commands/errors above record the newcomer friction.
 - Silicon's short recipe leaves JDK/Z3/sbt installation and example selection to the newcomer. Its README and performance summary disagree on Java 11 versus 21. A user-local installation recipe and a checked-in example command would remove these decisions.
 - SnaKt's Gradle wrapper handles the missing build tool automatically. Its documented test command and existing Z3 4.8.7 worked without changes; keep its solver selection separate from the Silicon benchmark environment.
-- jormungandr needs no undocumented build workaround, but its documented test command is not green: one golden-comparison failure and a shutdown cleanup exception need separate investigation.
+- jormungandr needs no undocumented build workaround, but its documented test command was not green: one intermittent backend-rejection/golden-comparison failure needs investigation. Focused checks pass with both documented Z3 4.8.7 and alternative 4.16.0; version alone does not explain it. A shutdown cleanup exception also appears in passing runs.
 - `/usr/bin/java -version` still reports 25.0.4.1 and `/usr/bin/z3 --version` still reports 4.8.7. All three working trees are clean. Local installations and Maven/Gradle/sbt caches remain in the account. The only system configuration change reported is the dispatcher's outbound-firewall fix; this session changed only user-local files/settings.
 
-Elapsed remote exercise was approximately 30 minutes including documentation reading, network diagnosis, operator-assisted access repair, and result checks, with log drafting interleaved. Timed downloads, clones, assembly/example, publish, tests, transfers and smoke account for approximately 22 minutes. No access blocker remains. The corpus smoke works; a full replication still needs launcher path adaptation, and jormungandr's default suite has one unresolved failing test.
+Initial setup took approximately 30 minutes including documentation reading, network diagnosis, operator-assisted access repair, and result checks, with log drafting interleaved. Its timed commands account for approximately 22 minutes. The focused follow-up adds approximately 20 minutes, including 17 minutes of timed filtered checks/regeneration attempts. No access blocker remains. The corpus smoke works; a full replication still needs launcher path adaptation, and jormungandr has an unresolved intermittent test failure.
