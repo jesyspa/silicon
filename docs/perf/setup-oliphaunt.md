@@ -1,8 +1,8 @@
 # Oliphaunt newcomer setup log
 
-29 October 2026, 14:35–14:54 CET. Operator account: `kameliya`, reached with `ssh oliphaunt`. Silicon builds and verifies its README example; SnaKt builds and passes all 171 tests. Private jormungandr access is blocked: GitHub SSH port 22 times out, and SSH over port 443 reaches GitHub but fails public-key authentication. The corpus/harness transfer and U/S smoke task work. After step 3 failed, the dispatcher explicitly authorized doing step 4 while it arranges the operator-approved GitHub key registration.
+29 October 2026, 14:35–15:05 CET. Operator account: `kameliya`, reached with `ssh oliphaunt`. Silicon builds and verifies its README example; SnaKt builds and passes all 171 tests. jormungandr builds, but its default test run has 595 passes and one golden-comparison failure. Private access initially failed; operator-approved key registration and an outbound firewall change resolved it. The corpus/harness transfer and U/S smoke task work. After the initial step-3 access failure, the dispatcher authorized step 4 before resuming jormungandr.
 
-No sudo, key/token transfer, system-tool replacement, upstream repository operation, or contact with Viper/JetBrains maintainers was used. Public clones use the `jesyspa` forks. Commands below ran on oliphaunt unless stated otherwise. Durations are wall seconds from `/usr/bin/time -p` unless marked approximate/unmeasured; they include cold dependency downloads, not just compilation. This is a setup exercise, not a performance comparison.
+This setup session used no sudo, key/token transfer, system-tool replacement, upstream repository operation, or contact with Viper/JetBrains maintainers. The dispatcher separately arranged the operator-approved authentication/firewall changes described in step 3. Public clones use the `jesyspa` forks. Commands below ran on oliphaunt unless stated otherwise. Durations are wall seconds from `/usr/bin/time -p` unless marked approximate/unmeasured; they include cold dependency downloads, not just compilation. This is a setup exercise, not a performance comparison.
 
 ## Initial environment and network
 
@@ -159,9 +159,11 @@ JUnit XML under `formver.compiler-plugin/build/test-results/test/` reports 142 t
 
 Friction: the README's Z3 example includes `sudo cp`, but the required version already exists and can be selected with `Z3_EXE`. The README correctly warns that daemons capture that variable; set it before starting Gradle. No daemon restart was necessary because no SnaKt daemon had been started with the other solver. Neither build nor test required patches or produced error/deprecation messages in the captured Gradle logs.
 
-## 3. jormungandr: blocked on authentication
+## 3. jormungandr: builds; one test fails
 
-No private repository contents were retrieved. Tested the requested URL with bounded, noninteractive authentication:
+### Initial access failure
+
+The first checks retrieved no private repository contents. Tested the requested URL with bounded, noninteractive authentication:
 
 ```sh
 cd ~/dev
@@ -180,13 +182,75 @@ To distinguish blocked port 22 from missing credentials, tried GitHub's SSH endp
   git ls-remote git@github.com:korrektness/jormungandr.git HEAD
 ```
 
-0.72 s, exit 128. Host key accepted into the temporary file; response: `git@ssh.github.com: Permission denied (publickey).` Thus port 443 is reachable, but the account currently offers no accepted GitHub identity. This fails before repository authorization, so it cannot tell us whether a future authenticated identity has repository access.
+0.72 s, exit 128. Host key accepted into the temporary file; response: `git@ssh.github.com: Permission denied (publickey).` Port 443 was reachable, but the account offered no accepted GitHub identity. This failed before repository authorization.
 
-Needed from the operator: provision/authorize an oliphaunt-owned SSH identity with read access to `korrektness/jormungandr` (or explicitly arrange another authorized authentication method). Use the reachable SSH-over-443 endpoint or restore port-22 connectivity. No keys/tokens were copied, generated, or registered by this setup. Once access works, resume with the private project's own README; its build remains untested.
+### Access restored and checkout
+
+The dispatcher obtained operator approval and registered oliphaunt's key with GitHub, then instructed this session to resume through port 443 without editing `~/.ssh/config`. A plain clone still failed with `Host key verification failed.` (0.64 s): GitHub authentication and local host trust are separate requirements. Retried with the scratch known-hosts file from the earlier successful port-443 handshake:
+
+```sh
+# Second phase's raw logs; the first phase's $R is unchanged elsewhere in this log.
+R2=/tmp/bot-run.bww2aXERQl
+cd ~/dev
+/usr/bin/time -p env \
+  GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=5 -o UserKnownHostsFile=/tmp/bot-run.eFGT3r3Vbg/github-known-hosts' \
+  git clone ssh://git@ssh.github.com:443/korrektness/jormungandr.git \
+  > "$R2/jormungandr-clone-retry.log" 2>&1
+cd jormungandr
+git rev-parse HEAD
+```
+
+Succeeded in 3.89 s. Commit: `442ff007d9d3dcdfe6e389c0cfe93c3cd40738d5`. No SSH config or default known-hosts file was edited by this session.
+
+During the build/test run, the dispatcher reported that outbound port 22 was opened in oliphaunt's ufw firewall and that `git@github.com` now authenticates. This was a separately administered change, not a user-local install step. Confirmed private repository access over port 22 after the test run:
+
+```sh
+/usr/bin/time -p env \
+  GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/bot-run.bww2aXERQl/github-port22-known-hosts' \
+  git ls-remote git@github.com:korrektness/jormungandr.git HEAD
+```
+
+Succeeded in 1.49 s, returning the same `442ff007…` HEAD. No keys/tokens were copied, generated or registered by this setup session. Private access is no longer blocked.
+
+### README build and tests
+
+Read jormungandr's README and linked `docs/developing.md`; they call the project SnaKt and prescribe `publishToMavenLocal` and `./gradlew test`. Used the same local JDK 21 and installed Z3 4.8.7 as the public SnaKt trial. The README also documents automatic Z3 provisioning for tests when an absolute `Z3_EXE` file is not provided; that fallback was not needed.
+
+```sh
+source ~/.local/opt/benchmark-env.sh
+export Z3_EXE=/usr/bin/z3
+cd ~/dev/jormungandr
+/usr/bin/time -p ./gradlew publishToMavenLocal > "$R2/jormungandr-publish.log" 2>&1
+/usr/bin/time -p ./gradlew test > "$R2/jormungandr-test.log" 2>&1
+```
+
+No Silicon-fork init script, dependency override, golden regeneration, or repository patch was used. Gradle 8.14.3 reused the earlier tool/dependency caches.
+
+| Command | Wall seconds | Result |
+|---|---:|---|
+| `./gradlew publishToMavenLocal` | 36.08 | BUILD SUCCESSFUL, 47 tasks executed / 1 from cache |
+| `./gradlew test` | 502.53 | BUILD FAILED, exit 1; 23 executed / 32 up-to-date |
+
+JUnit XML totals:
+
+| Module | Tests | Failures |
+|---|---:|---:|
+| compiler plugin | 522 | 1 |
+| test runner | 20 | 0 |
+| uniqueness | 7 | 0 |
+| core | 13 | 0 |
+| locality | 34 | 0 |
+| Total | 596 | 1 |
+
+No errors or skipped tests were reported. The failing case is `PhasedDiagnosticTestGenerated$Targets$Arraydeque.testArrayDeque()` (176.947 s). Its XML reports three golden mismatches: `ArrayDeque.viper.diag.txt`, `ArrayDeque.kt`, and `ArrayDeque.trust.txt`. The log does not establish their root cause; no expected-output updates or reruns were used to hide the failure. Detailed HTML report: `~/dev/jormungandr/formver.compiler-plugin/build/reports/tests/test/index.html`; XML: `formver.compiler-plugin/build/test-results/test/TEST-org.jetbrains.kotlin.formver.plugin.runners.PhasedDiagnosticTestGenerated$Targets$Arraydeque.xml`.
+
+Build warnings concern deprecated Kotlin symbol APIs; test compilation warns about a K1 API scheduled for deprecation. During JVM shutdown the test log also prints `java.io.IOException: java.lang.IllegalStateException: Shutdown in progress` from test-runner `Lifetime.closeResources`, with Silicon teardown attempting `Runtime.removeShutdownHook`. This cleanup exception is separate from the recorded golden mismatch; causality was not investigated in this setup exercise. The working tree remains clean.
+
+Publishing jormungandr also writes the local Maven repository used by SnaKt. The 171-test public SnaKt result above was obtained before that publication; it was not rerun afterward.
 
 ## 4. Corpus and U/S task: works
 
-The dispatcher authorized proceeding out of order while it handles private access. Read the copied harness README and the repository's [harness.md](../../harness.md). These are external experiment scripts rather than a standalone installable package.
+The dispatcher authorized proceeding out of order while it handled private access. Read the copied harness README and the repository's [harness.md](../../harness.md). These are external experiment scripts rather than a standalone installable package.
 
 From the source host, created matching directories on oliphaunt with `ssh oliphaunt 'mkdir -p …'`, then transferred:
 
@@ -244,9 +308,10 @@ Portability friction: `paired.py` imports from an absolute `/home/kameliya/data/
 
 ## Handoff and documentation friction
 
-- Public HTTPS works without account setup; GitHub port-22 SSH hangs unless bounded. Private access also needs authentication, independently of the network workaround.
+- Public HTTPS works without account setup. GitHub port-22 SSH initially hung, and private access additionally required key registration. Both access issues are now resolved; the initial commands/errors above record the newcomer friction.
 - Silicon's short recipe leaves JDK/Z3/sbt installation and example selection to the newcomer. Its README and performance summary disagree on Java 11 versus 21. A user-local installation recipe and a checked-in example command would remove these decisions.
 - SnaKt's Gradle wrapper handles the missing build tool automatically. Its documented test command and existing Z3 4.8.7 worked without changes; keep its solver selection separate from the Silicon benchmark environment.
-- At the end, `/usr/bin/java -version` still reports 25.0.4.1 and `/usr/bin/z3 --version` still reports 4.8.7. Both working trees are clean. Local installations and Maven/Gradle/sbt caches remain in the account; no global configuration was changed.
+- jormungandr needs no undocumented build workaround, but its documented test command is not green: one golden-comparison failure and a shutdown cleanup exception need separate investigation.
+- `/usr/bin/java -version` still reports 25.0.4.1 and `/usr/bin/z3 --version` still reports 4.8.7. All three working trees are clean. Local installations and Maven/Gradle/sbt caches remain in the account. The only system configuration change reported is the dispatcher's outbound-firewall fix; this session changed only user-local files/settings.
 
-Elapsed remote exercise was approximately 19 minutes including documentation reading, network diagnosis, and version/result checks, with log drafting interleaved. Timed downloads, clones, assembly/example, publish, tests, transfers and smoke account for approximately 13 minutes. Private GitHub access is the only hard blocker reached; the corpus smoke works, while a full replication still needs launcher path adaptation.
+Elapsed remote exercise was approximately 30 minutes including documentation reading, network diagnosis, operator-assisted access repair, and result checks, with log drafting interleaved. Timed downloads, clones, assembly/example, publish, tests, transfers and smoke account for approximately 22 minutes. No access blocker remains. The corpus smoke works; a full replication still needs launcher path adaptation, and jormungandr's default suite has one unresolved failing test.
