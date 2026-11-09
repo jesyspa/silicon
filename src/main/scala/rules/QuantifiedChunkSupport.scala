@@ -55,14 +55,19 @@ case class InverseFunctions(condition: Term,
                             axiomInvertiblesOfInverses: Quantification,
                             qvarExps: Option[Seq[ast.LocalVarDecl]],
                             qvarsToInverses: Map[Var, Function],
-                            qvarsToImages: Map[Var, Function]) {
+                            qvarsToImages: Map[Var, Function],
+                            /* If defined, these axioms define the inverse and image functions directly
+                             * and are emitted instead of the two axioms above; see
+                             * [[QuantifiedChunkSupporter.getFreshInverseFunctions]].
+                             */
+                            directDefinitions: Option[Vector[Quantification]] = None) {
 
   val inverses: Iterable[Function] = qvarsToInverses.values
 
   val images: Iterable[Function] = qvarsToImages.values
 
   val definitionalAxioms: Vector[Quantification] =
-    Vector(axiomInversesOfInvertibles, axiomInvertiblesOfInverses)
+    directDefinitions.getOrElse(Vector(axiomInversesOfInvertibles, axiomInvertiblesOfInverses))
 
   def inversesOf(argument: Term): Seq[App] =
     inversesOf(Seq(argument))
@@ -102,8 +107,16 @@ case class InverseFunctions(condition: Term,
     invertibles = invertibles.map(_.replace(terms)),
     additionalArguments = additionalArguments.map(_.replace(terms)),
     axiomInversesOfInvertibles = axiomInversesOfInvertibles.replace(terms).asInstanceOf[Quantification],
-    axiomInvertiblesOfInverses = axiomInvertiblesOfInverses.replace(terms).asInstanceOf[Quantification]
+    axiomInvertiblesOfInverses = axiomInvertiblesOfInverses.replace(terms).asInstanceOf[Quantification],
+    directDefinitions = directDefinitions.map(_.map(_.replace(terms).asInstanceOf[Quantification]))
   )
+}
+
+object InverseFunctions {
+  /** Experimental, off by default: -Dsilicon.exp.qpInverseTriggers=true.
+    * See [[QuantifiedChunkSupporter.getFreshInverseFunctions]].
+    */
+  val directDefinitionsEnabled: Boolean = java.lang.Boolean.getBoolean("silicon.exp.qpInverseTriggers")
 }
 
 case class SnapshotMapDefinition(resource: ast.Resource,
@@ -2013,6 +2026,56 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
         isGlobal = stateQVars.isEmpty,
         v.axiomRewriter)
 
+    /* The two axioms above feed each other's triggers: axFctsOfInvs mentions c(inv(rs)) and
+     * f(inv(rs)), which contain an instance of every trigger of axInvsOfFct (terms from c(xs) and
+     * f(xs)) with xs := inv(rs). The same holds for any other quantifier triggered on terms of c.
+     * Each round yields the terms inv(f(inv(rs))), which only collapse to inv(rs) once the
+     * prover has instantiated axInvsOfFct and decided c(inv(rs)).
+     *
+     * If each quantified variable x_i is itself one of the invertibles (at position p_i), and
+     * all other invertibles g_k do not mention the quantified variables, then the inverses are
+     * projections and can be defined directly:
+     *   inv_i(rs) == r_(p_i)
+     *   img_i(rs) <==> r_k == g_k, for each such k
+     * Both axioms above follow from these definitions, which mention no terms of c or f.
+     */
+    val directDefinitions: Option[Vector[Quantification]] = {
+      val positions = qvars.map(x => invertibles.indexOf(x))
+      val others = invertibles.zipWithIndex.filterNot { case (_, k) => positions.contains(k) }
+
+      if (   InverseFunctions.directDefinitionsEnabled
+          && !Verifier.config.disableISCTriggers()
+          && positions.forall(_ >= 0)
+          && others.forall { case (g, _) => !qvars.exists(g.contains) }) {
+
+        val imageDefinition = And(others.map { case (g, k) => codomainQVars(k) === g })
+
+        Some(qvarsWithIndices.flatMap { case (_, idx) =>
+          val inv = inversesOfCodomains(idx)
+          val img = imagesOfCodomains(idx)
+          Seq(
+            v.triggerGenerator.assembleQuantification(
+              Forall,
+              codomainQVars,
+              inv === codomainQVars(positions(idx)),
+              Seq(Trigger(inv)),
+              s"$qidPrefix-invDef",
+              isGlobal = stateQVars.isEmpty,
+              v.axiomRewriter),
+            v.triggerGenerator.assembleQuantification(
+              Forall,
+              codomainQVars,
+              if (imageDefinition == True) img else Iff(img, imageDefinition),
+              Seq(Trigger(img)),
+              s"$qidPrefix-imgDef",
+              isGlobal = stateQVars.isEmpty,
+              v.axiomRewriter))
+        }.toVector)
+      } else {
+        None
+      }
+    }
+
     val res = InverseFunctions(
       condition,
       invertibles,
@@ -2022,7 +2085,8 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
       axFctsOfInvs,
       qvarExps,
       qvars.zip(inverseFunctions).map{case (qvar, inv) => (qvar, inv)}.to(Map),
-      qvars.zip(imageFunctions).filter(_._2 != null).map{case (qvar, img) => (qvar, img)}.to(Map)
+      qvars.zip(imageFunctions).filter(_._2 != null).map{case (qvar, img) => (qvar, img)}.to(Map),
+      directDefinitions
     )
     (res, imagesOfCodomains)
   }
