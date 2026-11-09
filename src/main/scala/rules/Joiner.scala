@@ -43,6 +43,12 @@ trait JoiningRules extends SymbolicExecutionRules {
 }
 
 object joiner extends JoiningRules {
+  /* Number of joins requested by a join mode (see Config.JoinMode) that merged two or more
+   * feasible branches. A member during whose verification this did not change was verified
+   * exactly as it would have been without joins.
+   */
+  val joinModeMerges = new java.util.concurrent.atomic.AtomicLong()
+
   def join[D, JD](s: State, v: Verifier, resetState: Boolean = true)
                  (block: (State, Verifier, (State, D,  Verifier) => VerificationResult) => VerificationResult)
                  (merge: Seq[JoinDataEntry[D]] => (State, JD))
@@ -91,6 +97,7 @@ object joiner extends JoiningRules {
          */
         Success()
       } else {
+        if (!resetState && entries.length > 1) joinModeMerges.incrementAndGet()
         val (sJoined, dataJoined) = merge(entries)
         val sJoined2 = if (debugOn) v.recordHeap(sJoined, "nil", StateMerge, v.decider.pcs.duplicate()) else sJoined
 

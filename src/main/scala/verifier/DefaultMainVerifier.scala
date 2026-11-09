@@ -24,7 +24,7 @@ import viper.silicon.interfaces._
 import viper.silicon.interfaces.decider.ProverLike
 import viper.silicon.logger.{MemberSymbExLogger, SymbExLogger}
 import viper.silicon.reporting.{MultiRunRecorders, condenseToViperResult}
-import viper.silicon.rules.maskHeapSupporter
+import viper.silicon.rules.{joiner, maskHeapSupporter}
 import viper.silicon.state._
 import viper.silicon.state.terms.{Decl, Sort, Term, sorts}
 import viper.silicon.supporters.{AnnotationSupporter, DefaultDomainsContributor, DefaultMapsContributor, DefaultMultisetsContributor, DefaultPredicateVerificationUnitProvider, DefaultSequencesContributor, DefaultSetsContributor, MagicWandSnapFunctionsContributor, PredicateData}
@@ -293,12 +293,16 @@ class DefaultMainVerifier(config: Config,
           val startTime = System.currentTimeMillis()
           var results: Seq[VerificationResult] = null
           try {
+            val mergesBefore = joiner.joinModeMerges.get()
             results = v.methodSupporter.verify(s, method)
               .flatMap(extractAllVerificationResults)
-            if (s.moreJoins != JoinMode.Off && joinedByDefault(method) && results.exists(_.isFatal)) {
+            if (s.moreJoins != JoinMode.Off && joinedByDefault(method) && results.exists(_.isFatal) &&
+                joiner.joinModeMerges.get() != mergesBefore) {
               /* Joining is incomplete in ways that branching is not (e.g. permissions to one
                * location spread over conditional chunks). The method was joined only because
-               * joining is the default, so report what the unjoined execution reports.
+               * joining is the default, so report what the unjoined execution reports. If no
+               * branches were merged (here or, conservatively, in a concurrently verified
+               * member), the failed attempt already was the unjoined execution.
                */
               logger debug s"Verification of method `${method.name}` failed with joined branches; retrying without joins."
               v.decider.prover.comment(s"Retrying ${method.name} without joins")
