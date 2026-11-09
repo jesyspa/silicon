@@ -302,6 +302,7 @@ class DefaultMainVerifier(config: Config,
                */
               logger debug s"Verification of method `${method.name}` failed with joined branches; retrying without joins."
               v.decider.prover.comment(s"Retrying ${method.name} without joins")
+              v.decider.prover.restartWithSameState()
               results = v.methodSupporter.verify(s.copy(moreJoins = JoinMode.Off), method)
                 .flatMap(extractAllVerificationResults)
             }

@@ -655,6 +655,14 @@ abstract class ProverStdIO(uniqueId: String,
     ranOutOfMemorySinceLastCheck = true
   }
 
+  override def restartWithSameState(): Unit = {
+    if (suspendedFromDepth.isEmpty) {
+      comment("Restarting the prover")
+      restartAndReplay()
+      lastModel = null
+    }
+  }
+
   private def restartAndReplay(): Unit = {
     prover.destroyForcibly()
     prover.waitFor(10, TimeUnit.SECONDS)

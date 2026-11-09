@@ -53,6 +53,10 @@ trait Prover extends ProverLike with StatefulComponent {
   def getReasonUnknown(): String
   /* Whether the most recent satisfiability check was abandoned because the prover ran out of memory */
   def ranOutOfMemory(): Boolean = false
+  /** Replaces the prover process by a fresh one in the same state, if the prover supports it.
+    * Used to discard heuristic state the solver accumulated, e.g. before verifying a member again.
+    */
+  def restartWithSameState(): Unit = {}
   def clearLastAssert(): Unit
   def name: String
   def minVersion: Version
