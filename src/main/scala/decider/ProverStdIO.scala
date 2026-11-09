@@ -64,6 +64,15 @@ abstract class ProverStdIO(uniqueId: String,
    * answered as unknown, until the scope is popped.
    */
   protected var suspendedFromDepth: Option[Int] = None
+  /* With [[ProverStdIO.lazyPush]], the number of innermost scopes that have been pushed but not yet sent to the
+   * prover, and the timeout of their push. Such scopes are empty: any command that is sent first sends them.
+   * A pop cancels pending scopes without sending anything.
+   */
+  protected var pendingPushes: Int = 0
+  protected var pendingPushTimeout: Option[Int] = None
+
+  /* The depth of the scope stack that the prover holds (or would hold, if it is suspended) */
+  private def sentScopeDepth: Int = scopedCommands.length - 1 - pendingPushes
 
   var proverPath: Path = _
   var lastReasonUnknown : String = _
@@ -119,6 +128,7 @@ abstract class ProverStdIO(uniqueId: String,
     scopedCommands = Vector(mutable.ArrayBuffer())
     ranOutOfMemorySinceLastCheck = false
     suspendedFromDepth = None
+    pendingPushes = 0
     try {
       logfileWriter = if (!Verifier.config.outputProverLog) null else viper.silver.utility.Common.PrintWriter(Verifier.config.proverLogFile(uniqueId).toFile)
       proverPath = getProverPath
@@ -209,6 +219,7 @@ abstract class ProverStdIO(uniqueId: String,
       allDecls = Seq()
       allEmits = Seq()
       scopedCommands = Vector(mutable.ArrayBuffer())
+      pendingPushes = 0
       preambleAssumptions = Seq()
 
       Cleanup.run(
@@ -231,6 +242,19 @@ abstract class ProverStdIO(uniqueId: String,
   }
 
   def push(n: Int = 1, timeout: Option[Int] = None): Unit = {
+    if (ProverStdIO.lazyPush) {
+      if (pendingPushes > 0 && pendingPushTimeout != timeout) sendPendingPushes()
+      pendingPushes += n
+      pendingPushTimeout = timeout
+      pushPopScopeDepth += n
+      scopedCommands ++= Vector.fill(n)(mutable.ArrayBuffer[String]())
+    } else {
+      sendPendingPushes()
+      sendPush(n, timeout)
+    }
+  }
+
+  private def sendPush(n: Int, timeout: Option[Int]): Unit = {
     setTimeout(timeout)
     pushPopScopeDepth += n
     val cmd = (if (n == 1) "(push)" else "(push " + n + ")") + " ; " + pushPopScopeDepth
@@ -239,22 +263,44 @@ abstract class ProverStdIO(uniqueId: String,
     scopedCommands ++= Vector.fill(n)(mutable.ArrayBuffer[String]())
   }
 
+  /* Sends the pending pushes, one (push) each, preceded by their timeout, as an eager push would have. Called
+   * before every command that changes the prover's state.
+   */
+  protected def sendPendingPushes(): Unit = {
+    if (pendingPushes > 0) {
+      setTimeout(pendingPushTimeout)
+      while (pendingPushes > 0) {
+        writeLine("(push) ; " + (pushPopScopeDepth - pendingPushes + 1))
+        /* A memory-out restart replays the sent scopes only; the push is then sent again */
+        readSuccess()
+        pendingPushes -= 1
+      }
+    }
+  }
+
   def pop(n: Int = 1): Unit = {
-    val cmd = (if (n == 1) "(pop)" else "(pop " + n + ")") + " ; " + pushPopScopeDepth
-    pushPopScopeDepth -= n
-    writeLine(cmd)
-    readSuccess()
+    val cancelled = math.min(n, pendingPushes)
+    pendingPushes -= cancelled
+    pushPopScopeDepth -= cancelled
+    val sent = n - cancelled
+    if (sent > 0) {
+      val cmd = (if (sent == 1) "(pop)" else "(pop " + sent + ")") + " ; " + pushPopScopeDepth
+      pushPopScopeDepth -= sent
+      writeLine(cmd)
+      readSuccess()
+    }
     /* Declarations are global (see the prover config), hence only assertions are popped */
     val popped = scopedCommands.takeRight(n).flatten.filterNot(_.startsWith("(assert"))
     scopedCommands = scopedCommands.dropRight(n)
     scopedCommands.last ++= popped
-    if (suspendedFromDepth.exists(_ > scopedCommands.length - 1)) {
+    if (suspendedFromDepth.exists(_ > sentScopeDepth)) {
       comment(s"Resuming prover $uniqueId")
       restartAndReplay()
     }
   }
 
   def emit(content: String): Unit = {
+    sendPendingPushes()
     if (debugMode) {
       allEmits :+= content
     }
@@ -297,6 +343,7 @@ abstract class ProverStdIO(uniqueId: String,
   def assume(term: String): Unit = {
 //    bookkeeper.assumptionCounter += 1
 
+    sendPendingPushes()
     val cmd = "(assert " + term + ")"
     writeLine(cmd)
     readSuccess()
@@ -392,7 +439,8 @@ abstract class ProverStdIO(uniqueId: String,
   }
 
   protected def assertUsingPushPop(goal: String, timeout: Option[Int]): (Boolean, Long) = {
-    push()
+    sendPendingPushes()
+    sendPush(1, None)
     setTimeout(timeout)
 
     writeLine("(assert (not " + goal + "))")
@@ -423,6 +471,7 @@ abstract class ProverStdIO(uniqueId: String,
 
   def saturate(timeout: Int, comment: String): Unit = {
     this.comment(s"State saturation: $comment")
+    sendPendingPushes()
     setTimeout(Some(timeout))
     writeLine("(check-sat)")
     readCheckSatResult()
@@ -471,6 +520,7 @@ abstract class ProverStdIO(uniqueId: String,
   }
 
   protected def assertUsingSoftConstraints(goal: String, timeout: Option[Int]): (Boolean, Long) = {
+    sendPendingPushes()
     setTimeout(timeout)
 
     val guard = fresh("grd", Nil, sorts.Bool)
@@ -495,6 +545,7 @@ abstract class ProverStdIO(uniqueId: String,
   }
 
   def check(timeout: Option[Int] = None): Result = {
+    sendPendingPushes()
     setTimeout(timeout)
 
     writeLine("(check-sat)")
@@ -581,7 +632,7 @@ abstract class ProverStdIO(uniqueId: String,
 
     if (isOutOfMemory(answer)) {
       restartAfterMemoryOut()
-      if (suspendedFromDepth.isEmpty && !replay(lastCommand)) suspend(scopedCommands.length - 1)
+      if (suspendedFromDepth.isEmpty && !replay(lastCommand)) suspend(sentScopeDepth)
     } else {
       expectSuccess(answer)
     }
@@ -666,9 +717,9 @@ abstract class ProverStdIO(uniqueId: String,
     suspendedFromDepth = None
 
     /* The replayed commands are not logged again. A (push) makes Z3 process the preceding scope. */
-    comment(s"Replaying the prover state (${scopedCommands.length - 1} scopes)")
+    comment(s"Replaying the prover state ($sentScopeDepth scopes)")
     var depth = 0
-    while (suspendedFromDepth.isEmpty && depth < scopedCommands.length) {
+    while (suspendedFromDepth.isEmpty && depth <= sentScopeDepth) {
       if (depth > 0 && !replay("(push)")) suspend(depth - 1)
       else if (!scopedCommands(depth).forall(replay)) suspend(depth)
       depth += 1
@@ -785,4 +836,9 @@ abstract class ProverStdIO(uniqueId: String,
 object ProverStdIO {
   /* The retry of an assertion in a fresh prover is bounded by this multiple of the first-attempt timeout */
   val RetryTimeoutFactor = 4
+
+  /* -Dsilicon.exp.lazyPush=true: send a (push) only before the first command that needs its scope, and cancel
+   * pushes that are popped before that. The prover sees the same assertions at every check.
+   */
+  val lazyPush: Boolean = java.lang.Boolean.getBoolean("silicon.exp.lazyPush")
 }
