@@ -566,7 +566,7 @@ class Config(args: Seq[String]) extends SilFrontendConfig(args, "Silicon") {
 
   val moreJoins: ScallopOption[JoinMode] = opt[JoinMode]("moreJoins",
     descr = s"Decides when to join branches. Options are:\n${JoinMode.helpText}",
-    default = Some(JoinMode.Off),
+    default = Some(Config.defaultJoinMode),
     noshort = true
   )(singleArgConverter(mode => JoinMode(mode.toInt)))
 
@@ -906,6 +906,23 @@ object Config {
          |""".stripMargin
     }
   }
+
+  /** Experiment switch: -Dsilicon.exp.joins=1 (or true) makes impure-conditional joining the
+    * default, as if --moreJoins 1 were passed; -Dsilicon.exp.joins=2 does the same for mode 2.
+    * An explicit --moreJoins or a moreJoins annotation still wins. A method that is joined only
+    * because of this default and fails is verified again without joins (see DefaultMainVerifier),
+    * so the default cannot report an error that the unjoined execution would not report.
+    */
+  val defaultJoinMode: JoinMode = Option(System.getProperty("silicon.exp.joins")) match {
+    case Some("1") | Some("true") => JoinMode.Impure
+    case Some("2") => JoinMode.All
+    case _ => JoinMode.Off
+  }
+
+  /** Experiment switch: with -Dsilicon.exp.joinSimpleIfs=true, join mode 1 also joins
+    * if-statements whose branches only assign pure expressions to local variables.
+    */
+  val joinSimpleIfs: Boolean = java.lang.Boolean.getBoolean("silicon.exp.joinSimpleIfs")
 
   case class ProverStateSaturationTimeout(timeout: Int, comment: String)
 

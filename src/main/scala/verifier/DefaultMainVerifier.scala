@@ -295,6 +295,16 @@ class DefaultMainVerifier(config: Config,
           try {
             results = v.methodSupporter.verify(s, method)
               .flatMap(extractAllVerificationResults)
+            if (s.moreJoins != JoinMode.Off && joinedByDefault(method) && results.exists(_.isFatal)) {
+              /* Joining is incomplete in ways that branching is not (e.g. permissions to one
+               * location spread over conditional chunks). The method was joined only because
+               * joining is the default, so report what the unjoined execution reports.
+               */
+              logger debug s"Verification of method `${method.name}` failed with joined branches; retrying without joins."
+              v.decider.prover.comment(s"Retrying ${method.name} without joins")
+              results = v.methodSupporter.verify(s.copy(moreJoins = JoinMode.Off), method)
+                .flatMap(extractAllVerificationResults)
+            }
           } catch {
             case e: Throwable =>
               logger error s"An exception was thrown while verifying method `${method.name}`."
@@ -456,6 +466,11 @@ class DefaultMainVerifier(config: Config,
       moreCompleteExhaleQP = Verifier.config.exhaleModeQP == ExhaleMode.MoreComplete,
       moreJoins = Verifier.config.moreJoins())
   }
+
+  /* True iff the method's join mode comes from the default, not from the user. */
+  private def joinedByDefault(method: ast.Method): Boolean =
+    !Verifier.config.moreJoins.isSupplied &&
+      !method.info.getUniqueInfo[ast.AnnotationInfo].exists(_.values.contains(AnnotationSupporter.joinModeAnnotation))
 
   private def excludeMethod(method: ast.Method) = (
        !method.name.matches(config.includeMethods())

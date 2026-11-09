@@ -6,6 +6,7 @@
 
 package viper.silicon.rules
 
+import viper.silicon.Config.JoinMode
 import viper.silicon.debugger.DebugExp
 import viper.silicon._
 import viper.silicon.decider.{Mark, RecordedPathConditions}
@@ -242,7 +243,11 @@ object magicWandSupporter extends SymbolicExecutionRules {
      * (in particular, those about the wand's LHS) would be unsound. They are therefore consolidated
      * beforehand, such that permissions that are known to alias can be transferred to the wand's footprint.
      */
-    val sConsolidated = v.stateConsolidator(state).consolidate(state, v)
+    /* Branches are not joined while packaging the wand: a join would merge the footprints taken on
+     * branches that depend on the wand's LHS into conditional chunks, whereas the footprint must
+     * include the permissions taken on every such branch (see recordedBranches below).
+     */
+    val sConsolidated = v.stateConsolidator(state).consolidate(state.copy(moreJoins = JoinMode.Off), v)
 
     val s = if (sConsolidated.exhaleExt) sConsolidated else
       sConsolidated.copy(reserveHeaps = v.heapSupporter.getEmptyHeap(state.program, v) :: sConsolidated.h :: Nil)
@@ -252,7 +257,8 @@ object magicWandSupporter extends SymbolicExecutionRules {
      * path conditions resulting from their evaluation are not scoped to the package operation.
      */
     evals(s, wand.subexpressionsToEvaluate(s.program), _ => pve, v)((s1, tArgs, eArgs, v1) =>
-      packageWandWithArguments(s1, wand, tArgs, eArgs, proofScript, pve, v1)(Q))
+      packageWandWithArguments(s1, wand, tArgs, eArgs, proofScript, pve, v1)((s2, chWand, v2) =>
+        Q(s2.copy(moreJoins = state.moreJoins), chWand, v2)))
   }
 
   private def packageWandWithArguments(s: State,

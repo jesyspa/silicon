@@ -8,6 +8,7 @@ package viper.silicon.rules
 
 import viper.silicon.debugger.DebugExp
 import viper.silicon.common.collections.immutable.InsertionOrderedSet
+import viper.silicon.Config
 import viper.silicon.Config.JoinMode
 import viper.silver.cfg.silver.SilverCfg
 import viper.silver.cfg.silver.SilverCfg.{SilverBlock, SilverEdge}
@@ -106,6 +107,24 @@ object executor extends ExecutionRules {
     }
   }
 
+  /* A branch of an if-statement is simple if it reaches the join point directly, or through a
+   * single block that only assigns pure expressions to local variables. Joining such branches
+   * merges store entries but never conditionalises heap chunks.
+   */
+  private def isSimpleBranch(s: State, edge: SilverEdge, joinPoint: SilverBlock): Boolean =
+    edge.kind == cfg.Kind.Normal && (edge.target == joinPoint || (edge.target match {
+      case block @ cfg.StatementBlock(stmts) =>
+        stmts.forall {
+          case ast.LocalVarAssign(_, rhs) => rhs.isPure
+          case _: ast.LocalVarDeclStmt => true
+          case _ => false
+        } && (s.methodCfg.outEdges(block) match {
+          case Seq(cfg.UnconditionalEdge(_, `joinPoint`, cfg.Kind.Normal)) => true
+          case _ => false
+        })
+      case _ => false
+    }))
+
   private def follows(s: State,
                       edges: Seq[SilverEdge],
                       @unused pvef: ast.Exp => PartialVerificationError,
@@ -118,6 +137,9 @@ object executor extends ExecutionRules {
     // If joining branches is enabled, find join point if it exists.
     val jp: Option[SilverBlock] = if (s.moreJoins.id >= JoinMode.All.id) {
       edges.headOption.flatMap(edge => s.methodCfg.joinPoints.get(edge.source))
+    } else if (s.moreJoins.id >= JoinMode.Impure.id && Config.joinSimpleIfs && !s.exhaleExt) {
+      edges.headOption.flatMap(edge => s.methodCfg.joinPoints.get(edge.source))
+           .filter(jp => edges.forall(isSimpleBranch(s, _, jp)))
     } else {
       None
     }
@@ -126,7 +148,6 @@ object executor extends ExecutionRules {
       case (Seq(), _) => Q(s, v)
       case (Seq(edge), _) => follow(s, edge, v, joinPoint, pathId)(Q)
       case (Seq(edge1, edge2), Some(newJoinPoint)) if
-          s.moreJoins.id >= JoinMode.All.id &&
           // Can't directly match type because of type erasure ...
           edge1.isInstanceOf[ConditionalEdge[ast.Stmt, ast.Exp]] &&
           edge2.isInstanceOf[ConditionalEdge[ast.Stmt, ast.Exp]] &&
