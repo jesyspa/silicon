@@ -15,6 +15,7 @@ import viper.silicon.state.terms._
 import viper.silicon.state.terms.perms.IsPositive
 import viper.silicon.utils.ast.buildMinExp
 import viper.silicon.verifier.Verifier
+import viper.silicon.supporters.functions.NoopFunctionRecorder
 import viper.silver.ast
 import viper.silver.parser.PUnknown
 import viper.silver.verifier.VerificationError
@@ -149,6 +150,42 @@ object chunkSupporter extends ChunkSupportRules {
     }
   }
 
+  /* Experimental (-Dsilicon.exp.permNames=true). The amount taken from a chunk, min(ch.perm, perms), occurs in
+   * the chunk's remaining permission, in the taken chunk and in the permission still needed. Repeated consumes
+   * (e.g. reborrows) therefore double the tree size of permission terms. If the amount is large, name it once
+   * with a solver macro and refer to the macro application instead, so that term size stays linear. The solver
+   * expands the macro, so it sees the same formula. Small terms are kept as they are. */
+  private val permNames: Boolean = java.lang.Boolean.getBoolean("silicon.exp.permNames")
+  private val permNamesMinNodes: Int = Integer.getInteger("silicon.exp.permNames.minNodes", 16)
+
+  private def hasAtLeastNodes(t: Term, n: Int): Boolean = {
+    var budget = n
+    val stack = scala.collection.mutable.Stack[Term](t)
+    while (stack.nonEmpty && budget > 0) {
+      val u = stack.pop()
+      budget -= 1
+      viper.silicon.state.utils.subterms(u).foreach(stack.push)
+    }
+    budget <= 0
+  }
+
+  private def namePermTerm(s: State, t: Term, v: Verifier): Term = {
+    if (permNames && t.isInstanceOf[PermMin]
+        && s.functionRecorder == NoopFunctionRecorder
+        && s.packagingWandSnapshots.isEmpty
+        && !Verifier.config.useFlyweight
+        && Verifier.config.counterexample.toOption.isEmpty
+        && hasAtLeastNodes(t, permNamesMinNodes)) {
+      val macroArgs = (s.functionRecorderQuantifiedVariables() ++ s.quantifiedVariables).map(_._1)
+      val decl = v.decider.freshMacro("pTaken", macroArgs, t)
+      val app = App(Macro(decl.id, decl.args.map(_.sort), decl.body.sort), macroArgs)
+      v.symbExLog.addMacro(app, t)
+      app
+    } else {
+      t
+    }
+  }
+
   private def consumeGreedy(s: State,
                             h: Heap,
                             id: ChunkIdentifer,
@@ -181,7 +218,7 @@ object chunkSupporter extends ChunkSupportRules {
            * and permission terms do not double with every reborrow. */
           val exactTake = java.lang.Boolean.getBoolean("silicon.exp.exactReborrow") &&
             v.decider.check(PermAtMost(perms, ch.perm), Verifier.config.checkTimeout())
-          val toTake = if (exactTake) perms else PermMin(ch.perm, perms)
+          val toTake = if (exactTake) perms else namePermTerm(s, PermMin(ch.perm, perms), v)
           val toTakeExp = if (exactTake) permsExp else permsExp.map(pe => buildMinExp(Seq(ch.permExp.get, pe), ast.Perm))
           val newPermExp = permsExp.map(pe => ast.PermSub(ch.permExp.get, toTakeExp.get)(pe.pos, pe.info, pe.errT))
           val newChunk = ch.withPerm(PermMinus(ch.perm, toTake), newPermExp)
