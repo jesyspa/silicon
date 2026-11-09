@@ -48,7 +48,8 @@ class ProverMemoryOutTests extends AnyFunSuite {
   /* A Z3 prover that answers the commands in [[failOn]] with a memory-out, and the commands in [[replace]]
    * with the given answers, after processing them
    */
-  private class FailingProver(policy: AssertRetryPolicy = AssertRetryPolicy(newSeed = true, boundedFinal = true, contradictionSkip = true))
+  private class FailingProver(policy: AssertRetryPolicy = AssertRetryPolicy(newSeed = true, boundedFinal = true, contradictionSkip = true),
+                              override protected val lazyPush: Boolean = false)
     extends Z3ProverStdIO("memoryOut", new TermToSMTLib2Converter,
                                                     new DefaultIdentifierFactory("memoryOut"), NoopReporter) {
     var failOn: List[String] = Nil
@@ -157,6 +158,81 @@ class ProverMemoryOutTests extends AnyFunSuite {
       prover.assume("(> x 1)")
       assert(prover.assert("(> x 0)", None))
       assert(!prover.assert("(> x 2)", None))
+      assert(!prover.ranOutOfMemory())
+    }
+  }
+
+  private def lazyProver = new FailingProver(lazyPush = true)
+
+  private def scopeCommands(prover: FailingProver): Vector[String] =
+    prover.sent.filter(c => c.startsWith("(push") || c.startsWith("(pop"))
+
+  test("-Dsilicon.exp.lazyPush sends a push only before a command in its scope") {
+    withProver(lazyProver) { prover =>
+      prover.emit("(declare-const x Int)")
+      prover.sent = Vector.empty
+      prover.push()
+      prover.push()
+      prover.pop()
+      prover.pop()
+      assert(scopeCommands(prover).isEmpty)
+      assert(prover.pushPopScopeDepth == 0)
+
+      prover.push()
+      prover.push()
+      prover.pop()
+      prover.assume("(> x 0)")
+      prover.push()
+      assert(prover.pushPopScopeDepth == 2)
+      assert(prover.assert("(> x 0)", None))
+      prover.pop()
+      prover.pop()
+      assert(!prover.assert("(> x 0)", None))
+      assert(scopeCommands(prover) ==
+        Vector("(push) ; 1", "(push) ; 2", "(push) ; 3", "(pop) ; 3", "(pop) ; 2", "(pop) ; 1", "(push) ; 1", "(pop) ; 1"))
+    }
+  }
+
+  test("-Dsilicon.exp.lazyPush: a memory-out on a pending push replays the sent scopes only") {
+    withProver(lazyProver) { prover =>
+      prover.emit("(declare-const x Int)")
+      prover.push()
+      prover.push()
+      prover.sent = Vector.empty
+      prover.failOn = List("(push) ; 2")
+      prover.assume("(> x 0)")
+      assert(prover.failOn.isEmpty && prover.starts == 2)
+      /* The restart replays scope 1, then the failed push is sent again */
+      assert(scopeCommands(prover) == Vector("(push) ; 1", "(push) ; 2", "(push)", "(push) ; 2"))
+      assert(prover.assert("(> x 0)", None))
+      prover.pop()
+      assert(!prover.assert("(> x 0)", None))
+      prover.pop()
+      assert(prover.pushPopScopeDepth == 0)
+      prover.assume("false")
+      assert(prover.assert("(> x 0)", None))
+    }
+  }
+
+  test("-Dsilicon.exp.lazyPush: a prover suspended on a pending push resumes when its scope is popped") {
+    withProver(lazyProver) { prover =>
+      prover.emit("(declare-const x Int)")
+      prover.push()
+      prover.assume("(> x 0)")
+      prover.push()
+      prover.failOn = List("(push) ; 2", "(push) ; 2")
+      prover.assume("(> x 5)")
+      assert(prover.failOn.isEmpty)
+      assert(!prover.assert("(> x 0)", None))
+      assert(prover.ranOutOfMemory())
+      /* As for an eager push, the prover stays suspended until the scope before the failed push is popped */
+      prover.pop()
+      assert(!prover.assert("(> x 0)", None))
+      assert(prover.ranOutOfMemory())
+      prover.pop()
+      prover.assume("(> x 1)")
+      assert(prover.assert("(> x 0)", None))
+      assert(!prover.assert("(> x 5)", None))
       assert(!prover.ranOutOfMemory())
     }
   }

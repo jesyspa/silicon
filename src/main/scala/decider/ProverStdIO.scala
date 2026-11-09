@@ -68,6 +68,7 @@ abstract class ProverStdIO(uniqueId: String,
    * prover, and the timeout of their push. Such scopes are empty: any command that is sent first sends them.
    * A pop cancels pending scopes without sending anything.
    */
+  protected val lazyPush: Boolean = ProverStdIO.lazyPush
   protected var pendingPushes: Int = 0
   protected var pendingPushTimeout: Option[Int] = None
 
@@ -242,7 +243,7 @@ abstract class ProverStdIO(uniqueId: String,
   }
 
   def push(n: Int = 1, timeout: Option[Int] = None): Unit = {
-    if (ProverStdIO.lazyPush) {
+    if (lazyPush) {
       if (pendingPushes > 0 && pendingPushTimeout != timeout) sendPendingPushes()
       pendingPushes += n
       pendingPushTimeout = timeout
