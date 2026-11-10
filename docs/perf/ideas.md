@@ -327,6 +327,8 @@ Jorah made no code changes and ran no benchmarks; it did not read the full text 
 - Python `--z3Exe` injectivity proxy (2.8): unsound.
 - Bounded proof cache as written (2.11): Uniswap +14.7%, no Knights gain.
 - No-reassume of proven quantifiers and one-way sequence axioms (2.7): 4 and 6 suite regressions, pis still OOM.
+- `--moreJoins` as a default (18): a configuration choice, not a code improvement, with large per-file swings both ways and a soundness bug inside `package`.
+- Naming taken-permission terms (permdag, 18): no effect once exact take is on.
 - Lower sharing thresholds (1000 nodes / ratio 2) for SMT lets (2.1): six outcome changes.
 - Global `Evaluator.eval` memoization (5.3): effects make it unsound.
 - Quoting the 1.6-2.2x huge-method-flag speedup, the "5% + 7% = 12%" sum, hana's ">16x" reborrows ratio, or the "Z3 is 14% of CPU" headline without its qualifier (retracted).
@@ -582,6 +584,18 @@ The separate eight-seed logging run compares both prover streams for every file:
 The evidence establishes a JVM-side, frontend-dominated timing difference in the profiled feanor processes, not changed Z3 search or a hot store-lookup operation. JIT/profile history is a plausible explanation for the JVM-to-JVM variation, but no controlled JIT ablation completed, so it is not a demonstrated mechanism. Do not change the small lookup patch merely to chase this noise, or advertise the evening 7.6%/10.6% group losses as an intrinsic patch cost. A remaining feanor-only DaG investigation would need independent JVM replications on that host and phase/JIT controls, rather than additional seeds alone.
 
 Evidence and reproduction: `~/data/viper-corpus-results/dagrea-20261029/` contains `replication/` (paired adapter, launcher, eight-seed data, `original-cohort.json`), `logged/` (second launcher, logs, comparator and results), `profile/` (JFRs and summaries), `oliphaunt-run.sh`, `oliphaunt-replacements.sh`, `analyze-jvms.py`, and `oliphaunt-6jvm/` (copied raw runs, exclusions and analysis). The remote runs also remain at the same data-directory path on oliphaunt. No experimental source change was landed.
+
+## 18. Candidate night, 2026-11-10
+
+- Setup: fork main M (98db6546) against five candidate JARs built in about two hours and not gated on the test suite, 250 files, 3-8 seeds, five lanes, 40 GiB slice (hit twice). No A/A arm. Data: `~/data/viper-corpus-results/night-20261110-candidates/`.
+- Baseline bias: on 221 files with matching outcomes, M is 1.033 [1.008, 1.057] against the geomean of the candidates. Each candidate against the other four: frontend 0.986, joins 1.007, lazypush 0.986, permdag 1.003, qpinv 1.018; all intervals contain 1. permdag sent Z3 the same input as M (see below), so permdag/M 0.970 [0.945, 0.996] measures the bias. Treat night.py baseline gains of about 3% as noise without an A/A arm.
+- Noise: frontend vs M (same SMT), same seed, per-run log SD: wall 0.34, solver CPU 0.14, JVM CPU 0.58. With three seeds a single file must move about 97% (under 1 s), 55% (1-5 s) or 43% (over 5 s) to be visible. Gate candidates on their mechanism metric first.
+- frontend (Silver `perf/frontend-hotpaths` da635586: cached parse-node children, memoised names-in-scope in macro expansion, no child set in rewriting): output-identical by construction; expected gain a few percent on small files; not resolvable by the night.
+- lazypush (`perf/lazypush`): correct; ceiling about 1% (empty scopes are 14% of pops; push/pop is 4-11% of Z3 wait).
+- permdag (`perf/permdag`): with exact take on, it named no term on any of 204 surveyed files under 20 s. Complete exhale and quantified consume already use `pTaken` macros. Z3 expands macros, so naming does not reduce solver work (42.6 -> 40.9 s Z3 CPU vs 21.7 s for exact take). Dropped; exact take made default instead (14.13, bf36a2d4).
+- qpinv (`perf/qpinv`, inverse default value outside the image): sound but a case split, not a cutoff; mixed on targets. Replays located the loop in Silicon's aux copies of user quantifiers matching inverse terms in chunk conditions (Fences line 429 `{down(r)}`, list-buggy line 288 `{x in X}`), not in invOfFct/fctOfInv. Follow-up: substitute inverses for projection receivers (`perf/qpinv-subst`, in progress; replays in `~/.claude-tmp/qpinv.oa4b`).
+- joins (`perf/joins`, `--moreJoins 1` by default with an unjoined retry): no-go. It is a configuration choice; per-file effects swing both ways (scion getInterfaceState 92.7 -> 7.1 s, RSLSpinLock 17.5 -> 43 s); it verifies FollyRWSpinlockStronger_mod where M fails.
+- Soundness bug, upstream code (files identical to upstream/master ff386aec): with `--moreJoins 1` or `2`, `package acc(x.b) --* (x.b ? acc(y.f) : acc(z.f))` followed by `inhale acc(y.f) && acc(z.f); assert false` verifies; with joins off it fails. The impure-conditional join in `Consumer.scala:227` merges both branches during packaging, and `MagicWandSupporter.scala:390-391` records the merged branch with one fresh LHS snapshot. `perf/joins` switches joins off while packaging. Not reported upstream (closest: upstream issue #1021).
 
 ## 12. Source index
 
