@@ -734,19 +734,17 @@ abstract class ProverStdIO(uniqueId: String,
         logger warn msg
       }
 
-      // When `smt.qi.profile` is `true`, Z3 periodically reports the quantifier instantiations using the format
-      // `[quantifier_instances] "<quantifier_id>" : <instances> : <maximum generation> : <maximum cost>`.
-      // See: https://github.com/Z3Prover/z3/issues/4522
+      // Z3 emits quantifier profiles when `smt.qi.profile` is enabled.
       val qiProfile = result.startsWith("[quantifier_instances]")
       if (qiProfile) {
-        val qi_info = result.stripPrefix("[quantifier_instances]").split(":").map(_.trim)
-        if (qi_info.length != 4) {
-          val msg = s"Invalid quantifier instances line from prover: $result"
-          reporter report InternalWarningMessage(msg)
-          logger warn msg
-        } else {
-          reporter report QuantifierInstantiationsMessage(qi_info(0), qi_info(1).toInt, qi_info(2).toInt, qi_info(3).toInt)
-          logger info result
+        ProverStdIO.parseQuantifierProfile(result) match {
+          case Some(profile) =>
+            reporter report profile
+            logger info result
+          case None =>
+            val msg = s"Invalid quantifier instances line from prover: $result"
+            reporter report InternalWarningMessage(msg)
+            logger warn msg
         }
       }
 
@@ -783,6 +781,18 @@ abstract class ProverStdIO(uniqueId: String,
 }
 
 object ProverStdIO {
+  private[silicon] def parseQuantifierProfile(line: String): Option[QuantifierInstantiationsMessage] = {
+    val fields = line.stripPrefix("[quantifier_instances]").split(":", -1).map(_.trim)
+    // Z3 4.16 inserts simplify-true and checker-sat counts before generation and cost.
+    val generationIndex = fields.length match {
+      case 4 => 2
+      case 6 => 4
+      case _ => return None
+    }
+    scala.util.Try(QuantifierInstantiationsMessage(fields(0), fields(1).toInt,
+      fields(generationIndex).toInt, fields(generationIndex + 1).toInt)).toOption
+  }
+
   /* The retry of an assertion in a fresh prover is bounded by this multiple of the first-attempt timeout */
   val RetryTimeoutFactor = 4
 }
