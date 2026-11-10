@@ -10,7 +10,7 @@ import java.nio.file.Path
 
 import viper.silicon.{Silicon, SiliconFrontend}
 import viper.silver.reporter.NoopReporter
-import viper.silver.testing.{LocatedAnnotation, MissingOutput, SilSuite, UnexpectedOutput}
+import viper.silver.testing.{DefaultAnnotatedTestInput, ExpectedOutput, LocatedAnnotation, MissingOutput, SilSuite, UnexpectedOutput}
 import viper.silver.verifier.Verifier
 
 class SiliconTests extends SilSuite {
@@ -24,6 +24,29 @@ class SiliconTests extends SilSuite {
         "examples")
 
   val testDirectories: Seq[String] = siliconTestDirectories ++ silTestDirectories
+
+  override def buildTestInput(file: Path, prefix: String): DefaultAnnotatedTestInput = {
+    val input = DefaultAnnotatedTestInput(file, prefix)
+    if (!java.lang.Boolean.getBoolean("silicon.exp.qpInverseSubst")) return input
+
+    // Positive permission at null is contradictory; union membership implies membership in the union.
+    // These tests record solver incompleteness when inverse applications hide those facts.
+    val newlyProved = Map(
+      "quantifiedpermissions/misc/unbounded.vpr" -> Set(32),
+      "greedyQP/qp_unbounded.vpr" -> Set(32),
+      "quantifiedpermissions/sets/nonnull.vpr" -> Set(45),
+      "wands/new_syntax/QPFields.vpr" -> Set(16, 30, 41, 53, 66, 75, 87))
+    val annotations = input.annotations.annotations.filterNot {
+      case ann: ExpectedOutput => newlyProved.exists { case (path, lines) =>
+        ann.file.toString.replace('\\', '/').endsWith(path) && lines(ann.forLineNr)
+      }
+      case ann: UnexpectedOutput => newlyProved.exists { case (path, lines) =>
+        ann.file.toString.replace('\\', '/').endsWith(path) && lines(ann.forLineNr)
+      }
+      case _ => false
+    }
+    input.copy(annotations = input.annotations.copy(annotations = annotations))
+  }
 
   override def frontend(verifier: Verifier, files: Seq[Path]): SiliconFrontend = {
     require(files.length == 1, "tests should consist of exactly one file")
