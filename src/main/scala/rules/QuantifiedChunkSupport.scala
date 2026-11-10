@@ -55,14 +55,16 @@ case class InverseFunctions(condition: Term,
                             axiomInvertiblesOfInverses: Quantification,
                             qvarExps: Option[Seq[ast.LocalVarDecl]],
                             qvarsToInverses: Map[Var, Function],
-                            qvarsToImages: Map[Var, Function]) {
+                            qvarsToImages: Map[Var, Function],
+                            projections: Map[Var, Int] = Map.empty) {
 
   val inverses: Iterable[Function] = qvarsToInverses.values
 
   val images: Iterable[Function] = qvarsToImages.values
 
   val definitionalAxioms: Vector[Quantification] =
-    Vector(axiomInversesOfInvertibles, axiomInvertiblesOfInverses)
+    if (projections.nonEmpty) Vector.empty
+    else Vector(axiomInversesOfInvertibles, axiomInvertiblesOfInverses)
 
   def inversesOf(argument: Term): Seq[App] =
     inversesOf(Seq(argument))
@@ -73,14 +75,13 @@ case class InverseFunctions(condition: Term,
       App(inv, additionalArguments ++ arguments)
     ).to(Seq)
 
-  def qvarsToInversesOf(argument: Term): Map[Var, App] =
+  def qvarsToInversesOf(argument: Term): Map[Var, Term] =
     qvarsToInversesOf(Seq(argument))
 
-  def qvarsToInversesOf(arguments: Seq[Term]): Map[Var, App] =
-    /* TODO: Memoisation might be worthwhile, e.g. because often used with `?r` */
+  def qvarsToInversesOf(arguments: Seq[Term]): Map[Var, Term] =
     qvarsToInverses.map {
-      case (x, inv) => x -> App(inv, additionalArguments ++ arguments)
-    }.to(Map)
+      case (x, inv) => x -> (App(inv, additionalArguments ++ arguments): Term)
+    }.to(Map) ++ projections.map { case (x, index) => x -> arguments(index) }
 
   override lazy val toString: String = indentedToString("")
 
@@ -183,7 +184,8 @@ trait QuantifiedChunkSupport extends SymbolicExecutionRules {
                                stateQVars: Seq[Var],
                                userProvidedTriggers: Option[Seq[Trigger]],
                                qidPrefix: String,
-                               v: Verifier)
+                               v: Verifier,
+                               allowProjection: Boolean = false)
                               : (InverseFunctions, Seq[Term])
 
   def injectivityAxiom(qvars: Seq[Var],
@@ -245,7 +247,8 @@ trait QuantifiedChunkSupport extends SymbolicExecutionRules {
                             qidPrefix: String,
                             tag: Option[Int],
                             v: Verifier,
-                            program: ast.Program)
+                            program: ast.Program,
+                            allowProjection: Boolean = false)
                            : (QuantifiedBasicChunk, InverseFunctions)
 
   def splitHeap[CH <: QuantifiedBasicChunk : NotNothing : ClassTag]
@@ -355,7 +358,8 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
                             qidPrefix: String,
                             tag: Option[Int],
                             v: Verifier,
-                            program: ast.Program)
+                            program: ast.Program,
+                            allowProjection: Boolean)
                            : (QuantifiedBasicChunk, InverseFunctions) = {
 
     val (inverseFunctions, imagesOfCodomain) =
@@ -372,7 +376,8 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
         stateQVars,
         userProvidedTriggers,
         qidPrefix,
-        v)
+        v,
+        allowProjection)
 
     val qvarsToInversesOfCodomain = inverseFunctions.qvarsToInversesOf(codomainQVars)
 
@@ -867,6 +872,8 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
     else
       WildcardSimplifyingPermTimes(tPerm, s.permissionScalingFactor)
     val gainExp = ePerm.map(p => ast.PermMul(p, s.permissionScalingFactorExp.get)(p.pos, p.info, p.errT))
+    // Field permission bounds and heap-dependent resource triggers rely on inverse applications.
+    // Without explicit triggers, auxiliary quantifiers also reuse the inverse axiom's triggers.
     val (ch: QuantifiedBasicChunk, inverseFunctions) =
       quantifiedChunkSupporter.createQuantifiedChunk(
         qvars                = qvars,
@@ -888,7 +895,8 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
         qidPrefix            = qid,
         tag                  = Some(v.counter(this).next()),
         v                    = v,
-        program              = s.program)
+        program              = s.program,
+        allowProjection      = !resource.isInstanceOf[ast.Field] && !s.isUsedAsTrigger(resource) && optTrigger.isDefined)
     val (effectiveTriggers, effectiveTriggersQVars, effectiveTriggersQVarExps) =
       optTrigger match {
         case Some(_) =>
@@ -1136,7 +1144,8 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
         s.quantifiedVariables.map(_._1).filter(qvar => (tArgs ++ Seq(tCond)).exists(_.contains(qvar))),
         optTrigger.map(_ => tTriggers),
         qid,
-        v)
+        v,
+        !resource.isInstanceOf[ast.Field] && !s.isUsedAsTrigger(resource) && optTrigger.isDefined)
     val (effectiveTriggers, effectiveTriggersQVars) =
     optTrigger match {
       case Some(_) =>
@@ -1299,7 +1308,8 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
                     qid,
                     newTag,
                     v2,
-                    s3.program
+                    s3.program,
+                    !resource.isInstanceOf[ast.Field] && !s3.isUsedAsTrigger(resource) && optTrigger.isDefined
                   )
                   val debugExp = Option.when(debugOn)(DebugExp.createInstance("Inverse functions for quantified permission", true))
                   v.decider.assume(FunctionPreconditionTransformer.transform(inverseFunctions.axiomInvertiblesOfInverses, s3.program), debugExp)
@@ -1909,7 +1919,8 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
                                stateQVars: Seq[Var],
                                userProvidedTriggers: Option[Seq[Trigger]],
                                qidPrefix: String,
-                               v: Verifier)
+                               v: Verifier,
+                               allowProjection: Boolean)
                               : (InverseFunctions, Seq[Term]) = {
 
     assert(
@@ -1922,6 +1933,23 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
       invertibles.zip(codomainQVars).forall { case (e, r) => e.sort == r.sort },
         s"Sorts of the invertibles ${invertibles.mkString(", ")} doesn't match the sorts of the "
       + s"codomain quantification variables ${codomainQVars.mkString(", ")}")
+
+    val projectionIndices = qvars.map(invertibles.indexOf)
+    // Counterexample reconstruction currently discovers candidate locations from inverse models.
+    if (allowProjection && java.lang.Boolean.getBoolean("silicon.exp.qpInverseSubst") &&
+        Verifier.config.counterexample.toOption.isEmpty && qvars.nonEmpty &&
+        projectionIndices.forall(_ >= 0) &&
+        invertibles.forall(t => qvars.contains(t) || !qvars.exists(t.contains))) {
+      val projections = qvars.zip(projectionIndices).to(Map)
+      val image = And(invertibles.zip(codomainQVars).map { case (arg, codomain) =>
+        val index = qvars.indexOf(arg)
+        codomain === (if (index >= 0) codomainQVars(projectionIndices(index)) else arg)
+      })
+      val unusedInvAxiom = Forall(qvars, True, Nil, s"$qidPrefix-invOfFct")
+      val unusedFctAxiom = Forall(codomainQVars, True, Nil, s"$qidPrefix-fctOfInv")
+      return (InverseFunctions(condition, invertibles, invertibleExps, additionalInvArgs.toVector,
+        unusedInvAxiom, unusedFctAxiom, qvarExps, Map.empty, Map.empty, projections), Seq(image))
+    }
 
     val qvarsWithIndices = qvars.zipWithIndex
 
@@ -2093,7 +2121,7 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
   private def invertiblesWithInversesApplied(invs: Seq[InverseFunctions], quantifiedVars: Seq[Var]): Seq[Term] =
     invs.flatMap(inv => {
       val qvarsAndInverses: Map[Var, Term] =
-        inv.qvarsToInverses.map { case (x, fn) => x -> (App(fn, inv.additionalArguments ++ quantifiedVars): Term) }.to(Map)
+        inv.qvarsToInversesOf(quantifiedVars)
       inv.invertibles.map(_.replace(qvarsAndInverses))
     })
 
@@ -2243,11 +2271,11 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
         // We extract the receiver terms, i.e., the invertibles
         val chunkInfo = c match {
           case qfc: QuantifiedFieldChunk if qfc.invs.nonEmpty =>
-            Some(qfc.invs.flatMap(_.invertibles), qfc.invs.flatMap(_.qvarsToInverses.keys))
+            Some(qfc.invs.flatMap(_.invertibles), qfc.invs.flatMap(inv => inv.qvarsToInverses.keys ++ inv.projections.keys))
           case qpc: QuantifiedPredicateChunk if qpc.invs.nonEmpty =>
-            Some(qpc.invs.flatMap(_.invertibles), qpc.invs.flatMap(_.qvarsToInverses.keys))
+            Some(qpc.invs.flatMap(_.invertibles), qpc.invs.flatMap(inv => inv.qvarsToInverses.keys ++ inv.projections.keys))
           case qwc: QuantifiedMagicWandChunk if qwc.invs.nonEmpty =>
-            Some(qwc.invs.flatMap(_.invertibles), qwc.invs.flatMap(_.qvarsToInverses.keys))
+            Some(qwc.invs.flatMap(_.invertibles), qwc.invs.flatMap(inv => inv.qvarsToInverses.keys ++ inv.projections.keys))
           case _ => None
         }
         chunkInfo match {
