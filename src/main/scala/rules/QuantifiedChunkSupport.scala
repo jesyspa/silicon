@@ -872,8 +872,6 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
     else
       WildcardSimplifyingPermTimes(tPerm, s.permissionScalingFactor)
     val gainExp = ePerm.map(p => ast.PermMul(p, s.permissionScalingFactorExp.get)(p.pos, p.info, p.errT))
-    // Field permission bounds and heap-dependent resource triggers rely on inverse applications.
-    // Without explicit triggers, auxiliary quantifiers also reuse the inverse axiom's triggers.
     val (ch: QuantifiedBasicChunk, inverseFunctions) =
       quantifiedChunkSupporter.createQuantifiedChunk(
         qvars                = qvars,
@@ -896,7 +894,7 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
         tag                  = Some(v.counter(this).next()),
         v                    = v,
         program              = s.program,
-        allowProjection      = !resource.isInstanceOf[ast.Field] && !s.isUsedAsTrigger(resource) && optTrigger.isDefined)
+        allowProjection      = projectionAllowed(s, resource))
     val (effectiveTriggers, effectiveTriggersQVars, effectiveTriggersQVarExps) =
       optTrigger match {
         case Some(_) =>
@@ -1145,7 +1143,7 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
         optTrigger.map(_ => tTriggers),
         qid,
         v,
-        !resource.isInstanceOf[ast.Field] && !s.isUsedAsTrigger(resource) && optTrigger.isDefined)
+        projectionAllowed(s, resource))
     val (effectiveTriggers, effectiveTriggersQVars) =
     optTrigger match {
       case Some(_) =>
@@ -1309,7 +1307,7 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
                     newTag,
                     v2,
                     s3.program,
-                    !resource.isInstanceOf[ast.Field] && !s3.isUsedAsTrigger(resource) && optTrigger.isDefined
+                    projectionAllowed(s3, resource)
                   )
                   val debugExp = Option.when(debugOn)(DebugExp.createInstance("Inverse functions for quantified permission", true))
                   v.decider.assume(FunctionPreconditionTransformer.transform(inverseFunctions.axiomInvertiblesOfInverses, s3.program), debugExp)
@@ -1903,6 +1901,15 @@ object quantifiedChunkSupporter extends QuantifiedChunkSupport {
       implies,
       triggers,
       s"$qidPrefix-rcvrInj")
+  }
+
+  private def projectionAllowed(s: State, resource: ast.Resource): Boolean = {
+    if (!java.lang.Boolean.getBoolean("silicon.exp.qpInverseSubst") || s.isUsedAsTrigger(resource)) return false
+    val havocked = s.program.deepCollect {
+      case h: ast.Quasihavoc if h.exp.res(s.program) == resource => h
+      case h: ast.Quasihavocall if h.exp.res(s.program) == resource => h
+    }.nonEmpty
+    !havocked
   }
 
   // TODO: Update method's API documentation

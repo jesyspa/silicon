@@ -377,11 +377,10 @@ class DefaultStateConsolidator(protected val config: Config) extends StateConsol
           for (chunk <- fieldChunks) {
             /* Only assume the quantified bound for chunks that have inverse functions to trigger
              * on: an untriggered quantifier here severely degrades prover performance. Singleton
-             * chunks instead get the pointwise bound below; chunks with neither inverse functions
-             * nor a singleton receiver (which can result from merging chunks in the greedy QP
-             * modes) get no bound assumption. */
-            if (chunk.invs.nonEmpty) {
-              val chunkReceivers = chunk.invs.flatMap(_.qvarsToInversesOf(chunk.quantifiedVars).values)
+             * chunks instead get the pointwise bound below; chunks without inverse functions
+             * or a singleton receiver, including projection chunks, get no bound assumption. */
+            if (chunk.invs.exists(_.inverses.nonEmpty)) {
+              val chunkReceivers = chunk.invs.flatMap(_.inversesOf(chunk.quantifiedVars))
               val triggers = chunkReceivers.map(r => Trigger(r))
               val currentPermAmount = PermLookup(field.name, pmDef.pm, chunk.quantifiedVars.head)
               v.decider.prover.comment(s"Assume upper permission bound for field ${field.name}")
