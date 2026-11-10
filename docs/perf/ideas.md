@@ -597,6 +597,13 @@ Evidence and reproduction: `~/data/viper-corpus-results/dagrea-20261029/` contai
 - joins (`perf/joins`, `--moreJoins 1` by default with an unjoined retry): no-go. It is a configuration choice; per-file effects swing both ways (scion getInterfaceState 92.7 -> 7.1 s, RSLSpinLock 17.5 -> 43 s); it verifies FollyRWSpinlockStronger_mod where M fails.
 - Soundness bug, upstream code (files identical to upstream/master ff386aec): with `--moreJoins 1` or `2`, `package acc(x.b) --* (x.b ? acc(y.f) : acc(z.f))` followed by `inhale acc(y.f) && acc(z.f); assert false` verifies; with joins off it fails. The impure-conditional join in `Consumer.scala:227` merges both branches during packaging, and `MagicWandSupporter.scala:390-391` records the merged branch with one fresh LHS snapshot. `perf/joins` switches joins off while packaging. Not reported upstream (closest: upstream issue #1021).
 
+## 19. qpInverseSubst reach and instantiations, 2026-11-10 evening
+
+- Planned night (6ced6bf4, arms M / Q = `-Dsilicon.exp.qpInverseSubst=true` / MM = A/A, 3 lanes, plus seeds 5-9 on the five targets) was postponed; ready to run from `~/data/viper-corpus-results/night-20261111-qpinv/launch.sh` (frozen JAR, manifests, harness).
+- Reach census: SMT logs with the flag off, on and off again (seed 0, 40 s timeout), comment lines stripped (Silicon writes a `; Started:` timestamp). 221 of 258 files done before the run was stopped: the flag changes the SMT on 27 (Flo 13, RSL 8, Py 4, PP 1, PyP 1) and on none in DaG, DaV, Go, GoC, Rea, Ru1-3, SC, VeV. Flag-off control is not deterministic on uniswap_alloc and ASSSP. On the other ~88% of files Q equals M by construction, so a corpus night measures Q only on those 27 plus noise.
+- Instantiation counts (fork 2c37c323 parses Z3 4.16 profiles; `--logLevel INFO --proverArgs 'smt.qi.profile=true'`), seed 0, one run each, four in parallel: Fences off T with ~500 instances (stalled push), on V with 10.9M; list-buggy F both, 542k vs 535k; acyclic dll-buggy T both, 2.66M -> 1.94M; dijkstra-buggy T both, 5.68M -> 4.69M; last-edge dll-buggy T both, 9.12M -> 8.10M (per-quantifier peaks +15%). Timeouts count only the work done before the cut.
+- Machine load: eight concurrent Silicon/Z3 runs at -Xmx4g plus a Gradle suite drove the desktop to load 33 and 16 GB swap. Future daytime runs: at most 2 concurrent, `nice -n 19`, and only with operator approval.
+
 ## 12. Source index
 
 - Section 14: stage reports in `/opt/bots/log/workflow-runs/run-1792927685-e7215b-artifacts/.workflow-run/`; data directories listed at the top of section 14.
