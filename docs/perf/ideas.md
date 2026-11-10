@@ -351,7 +351,7 @@ Revised 2026-10-27 from the seeded data (section 14). Ordered roughly by measure
 6. **E's remaining costs** (14.3, 14.12): global first-attempt cuts are rejected. A 2 s wall cap helps list-buggy but makes quick.pvl 7.20x slower; 8M rlimit makes selection 4.81x slower. Keep the default budget; target the instantiation-heavy searches instead.
 7. **QP inverse-function axiom triggers** (14.7, item7): `{down(r)}` on invOfFct/fctOfInv loops on FencesDblMsgPassAcqRewrite; dropping it in a replay finishes the stalled push in 25 s. Same matcher as the aux filter.
 8. **Seq index axioms in Silicon's prelude** (14.4, 14.9): W50 (needs atomic/auction/testTranspose checks), one-round reverse axioms (needs translator-tagged index terms), narrow no-reassume (needs a6fb554a gated). The same axioms are culprits in binary_search_tree, ASSSP, ABFS, timsort1 and pair_insertion_sort.
-9. **Reborrow change** (14.6): fix the flag name and drop the unmeasured Option B, then decide default-on. Corpus 0.969 wall, outcome-safe on 1,612 runs.
+9. **Reborrow change** (14.6, 14.13): default-on candidate; corpus 0.969 wall, outcome-safe on 1,612 runs.
 10. **Idle-runner heap** (14.8): tighten heap ratios only while a warm runner is idle; find why about 1.1 GB stays live between requests.
 11. **Propositional budget (3.3) with ablation**, PC index (4.1, CPU-only gain 3.6-3.9% on bam), `PathConditions.declarations` (4.4): unchanged from before, not run in this window.
 12. **Per-member axiom pruning census** and dead axioms beyond proxies (old lead 8); warm profile of Silicon-internal CPU (old lead 12): not run in this window.
@@ -379,7 +379,7 @@ Method for every number below: Z3 4.16.0, warm JDK 21.0.10, `-Xmx4g`, 3 GB Z3 ca
 |---|---|---|---|
 | E as V3: skip contradicted checks + fresh-prover retry, retry seed = user seed + n, first attempt 1500 ms (rlimit 15M), retry bounded at 4x | 9a959ab9, dd279def, 58fe594b, 6ad9ba82 (= measured `perf/both-v3-bounded-retry` e2e3ee35) | on | 14.3 |
 | Sequence distinctness in inverse-function form, whole-sequence guards only | 8bc5fd04..544c0c51 (= measured bf862649) | on since 2026-10-27 (default-on suite 1560/0); off with `-Dsilicon.exp.seqDistinctInverse=false` | 14.5 |
-| Reborrow: take exactly `perms` when provably available | 7e42b83e (= measured f4589728, byte-identical) | off; reads `-Dsilicon.proto.minSimp=true` (see 14.10) | 14.6 |
+| Reborrow: take exactly `perms` when provably available | 7e42b83e (= measured f4589728, byte-identical) | default on in candidate; `-Dsilicon.exp.exactReborrow=false` disables it (14.13) | 14.6 |
 | Harness: noise profile, adaptive seeds, baseline caps, tiers, GC-CPU logs, per-request JVM peak RSS | a68059cb..e96fa01e | tooling | 14.8 |
 | Matching-loop analysis (`utils/scripts/matching_loops/`), per-command SMT timing | 64cc1808..b8869ecc, d47170a1 | tooling | 14.9 |
 | Suite Z3 cap (`memory_max_size=3000` in SiliconTests), `utils/scripts/suite_times.py` | aa7c2fde | tests | 14.8 |
@@ -489,9 +489,16 @@ Main with all of the above vs the original 572cf2c8 (`impact-20261027`, T2, ≥3
 
 ### 14.10 Open issues found in this run
 
-- 7e42b83e's message says `-Dsilicon.exp.exactReborrow=true`, but the code reads `silicon.proto.minSimp` and also contains an unmeasured Option B (`silicon.proto.permMacro`) and a "PROTOTYPE" comment. The impact run passed the documented name, so its N arm ran without the reborrow change.
+- At 7e42b83e the documented reborrow flag name did not match the implementation, and the impact run's N arm ran without the reborrow change. The implementation now uses `silicon.exp.exactReborrow`; the unmeasured Option B was removed.
 - Intermittent `StackOverflowError` in the evaluator on Ru3/mendel/assignments.vpr (night 1 W50, night 2 Skip and Retry, 10-23 night): unexplained, not arm-specific.
 - linked-list-qp-append makes suite wall time unusable (13 s to a 600 s timeout or 8 GB Z3 on main); use `suite_times.py`, or turn on the distinctness rewrite.
+
+### 14.13 Exact reborrow default-on candidate, 2026-11-10
+
+- Default on, disabled by `-Dsilicon.exp.exactReborrow=false`. Retained the existing experimental JVM property rather than adding a public Config option: this keeps the ablation switch without committing to a permanent user-facing CLI. Silicon suite with Z3 4.16.0: 1,578 passed, 0 failed, 62 canceled, 54 ignored.
+- Small targeted check, not a corpus estimate: 20 files from 16 groups, including five Ru2 reborrow files and 15 other groups selected from the nightly manifest with profiled median wall under 2 s. Warm JDK 21.0.10, one verifier, Z3 4.16.0, 3 GB solver limit, 120 s timeout, three seeds, three lanes on CPUs 0,1,4,8,9,12. Same JAR on/off, shuffled and interleaved, no baseline-position cap. GoC uses its manifest's injectivity option. Data and manifest: `~/.pi/agent/scratchpad/exact-reborrow-default/`.
+- All 60 paired outcomes match: per arm 33 verified and 27 failed; four selected files fail in the frontend and do not exercise Z3. On/off solver CPU geometric mean of per-file seed medians is 0.911 over 15 positive, stable files (max/min at most 2 in both arms); 0.918 over all 16 positive files. Timing resolution is 0.01 CPU seconds, material for the small files; one positive file is seed-unstable, and the four frontend failures are excluded. Two regular reborrow files have ratios 0.492 and 0.446. Wall ratio is 0.976 [0.876, 1.067] over 15 stable files; startup and seed noise limit inference about small-file overhead.
+- Separate logged runs, same files, arms and seeds: total check-sats per seed 6,723 off vs 6,697 on. Each of the two regular reborrow files drops 2,214 to 2,201; all other files are unchanged. Frontend failures contribute zero. Logging changes timing, so these runs supply counts only; per-file logs are in `counts/`.
 
 ## 15. Per-verification startup cost, 2026-10-28
 

@@ -176,10 +176,10 @@ object chunkSupporter extends ChunkSupportRules {
             (Incomplete(perms, permsExp), s, h, None)
           }
         } else if (consumeExact) {
-          /* Experimental (-Dsilicon.exp.exactReborrow=true): if the solver proves perms <= ch.perm, take exactly
+          /* If the solver proves perms <= ch.perm, take exactly
            * perms instead of min(ch.perm, perms), so that a later return cancels via PermPlus(PermMinus(p, a), a) == p
            * and permission terms do not double with every reborrow. */
-          val exactTake = java.lang.Boolean.getBoolean("silicon.exp.exactReborrow") &&
+          val exactTake = java.lang.Boolean.parseBoolean(System.getProperty("silicon.exp.exactReborrow", "true")) &&
             v.decider.check(PermAtMost(perms, ch.perm), Verifier.config.checkTimeout())
           val toTake = if (exactTake) perms else PermMin(ch.perm, perms)
           val toTakeExp = if (exactTake) permsExp else permsExp.map(pe => buildMinExp(Seq(ch.permExp.get, pe), ast.Perm))
