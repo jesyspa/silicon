@@ -72,8 +72,15 @@ abstract class ProverStdIO(uniqueId: String,
    * question was asked inside it is never sent: its assumptions are dropped, and its declarations stay
    * buffered, because declarations are global (see the prover configs). Comments stay buffered as well, so
    * that the log keeps them in order, between the commands that were sent.
+   *
+   * A scope that is never sent leaves a boundary behind. Z3 processes the assertions it has received when a
+   * scope is pushed, so that a push splits the assertions of the enclosing scope into batches, and how Z3
+   * simplifies an assertion depends on its batch. Without the pushes of the dropped scopes the batches grow,
+   * and proofs that are found quickly otherwise can take minutes (Nagini's get_closest_vowel example). When
+   * the buffer is sent, a boundary that follows an assertion is therefore sent as an empty scope.
    */
   protected val lazySync: Boolean = ProverStdIO.lazySyncEnabled
+  private val lazySyncBoundaries: Boolean = ProverStdIO.lazySyncBoundaries
   private val pending = mutable.ArrayBuffer[AnyRef]() /* String commands and the Pending* entries */
   private var pendingPushes = 0
 
@@ -291,7 +298,8 @@ abstract class ProverStdIO(uniqueId: String,
           /* The innermost scope was never sent, so there is nothing to pop in the prover */
           var push = pending.length - 1
           while (!pending(push).isInstanceOf[ProverStdIO.PendingPush]) push -= 1
-          dropPendingScope(push)
+          pending(push) = ProverStdIO.PendingBoundary
+          dropPendingScope(push + 1)
           pendingPushes -= 1
           pushPopScopeDepth -= 1
         } else {
@@ -308,9 +316,8 @@ abstract class ProverStdIO(uniqueId: String,
     }
   }
 
-  /* Removes the buffered entries of the scope that starts at the given index: the push itself, if there is
-   * one at that index, and the assumptions after it. Declarations, other global commands and comments
-   * remain buffered, in order.
+  /* Removes the buffered entries of the innermost scope from the given index on: its assumptions, and the
+   * boundaries of scopes inside it. Declarations, other global commands and comments remain buffered, in order.
    */
   private def dropPendingScope(from: Int): Unit = {
     var kept = from
@@ -319,7 +326,7 @@ abstract class ProverStdIO(uniqueId: String,
       val keep = pending(i) match {
         case cmd: String => !cmd.startsWith("(assert")
         case _: ProverStdIO.PendingComment => true
-        case _ => false /* a push or an assumption */
+        case _ => false /* an assumption or a boundary */
       }
       if (keep) {
         pending(kept) = pending(i)
@@ -336,11 +343,25 @@ abstract class ProverStdIO(uniqueId: String,
       val entries = pending.toArray
       pending.clear()
       pendingPushes = 0
+      /* Whether the prover has received an assertion since it last processed its assertions */
+      var unprocessedAssertions = false
       entries foreach {
-        case cmd: String => sendCommand(cmd)
-        case ProverStdIO.PendingAssume(term) => sendCommand("(assert " + termConverter.convert(term) + ")")
-        case ProverStdIO.PendingPush(timeout) => sendPush(1, timeout)
+        case cmd: String =>
+          sendCommand(cmd)
+          if (cmd.startsWith("(assert")) unprocessedAssertions = true
+        case ProverStdIO.PendingAssume(term) =>
+          sendCommand("(assert " + termConverter.convert(term) + ")")
+          unprocessedAssertions = true
+        case ProverStdIO.PendingPush(timeout) =>
+          sendPush(1, timeout)
+          unprocessedAssertions = false
         case ProverStdIO.PendingComment(text) => logToFile(text)
+        case ProverStdIO.PendingBoundary =>
+          if (unprocessedAssertions && lazySyncBoundaries) {
+            sendPush(1, None)
+            sendPop(1)
+            unprocessedAssertions = false
+          }
       }
     }
   }
@@ -914,10 +935,16 @@ object ProverStdIO {
   private final case class PendingPush(timeout: Option[Int])
   private final case class PendingAssume(term: Term)
   private final case class PendingComment(text: String)
+  /* Where a scope began that was popped before it was sent */
+  private case object PendingBoundary
 
   /** Whether provers buffer state-extending commands until they are asked a question;
     * disable with `-Dsilicon.exp.lazySync=false`. */
   def lazySyncEnabled: Boolean = System.getProperty("silicon.exp.lazySync", "true") != "false"
+
+  /** Whether a scope that is never sent still separates the assertions before it from those after it;
+    * `-Dsilicon.exp.lazySync=bare` disables this, for measurements. */
+  def lazySyncBoundaries: Boolean = System.getProperty("silicon.exp.lazySync", "true") != "bare"
 
   /** A timeout that stands for the small budget of [[Prover.assertQuickly]], see [[ProverStdIO.setTimeout]] */
   val QuickTimeout: Int = -2

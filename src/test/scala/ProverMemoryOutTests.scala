@@ -180,18 +180,61 @@ class ProverMemoryOutTests extends AnyFunSuite {
       prover.pop()
       assert(sent.isEmpty)
 
-      /* The inner scope is not sent, but its declaration is: declarations are global */
+      /* The inner scope is not sent, but its declaration is: declarations are global. An empty scope takes its
+       * place, because it follows an assertion: the prover processes its assertions when a scope is pushed.
+       */
       assert(prover.assert("(> x (- 1))", None))
-      assert(sent.take(3) == Vector("(push) ; 1", "(assert (> x 0))", "(declare-const y Int)"))
+      assert(sent.take(5) ==
+        Vector("(push) ; 1", "(assert (> x 0))", "(push) ; 2", "(pop) ; 2", "(declare-const y Int)"))
       assert(!sent.contains("(assert (> y x))"))
-      assert(sent.count(_.startsWith("(push)")) == 2 && sent.count(_.startsWith("(pop)")) == 1)
+      assert(sent.count(_.startsWith("(push)")) == 3 && sent.count(_.startsWith("(pop)")) == 2)
 
       /* The outer scope was sent and is therefore popped in the prover */
       prover.pop()
       prover.assume("(> y 5)")
       assert(!prover.assert("(> x 0)", None))
       assert(prover.assert("(> y 4)", None))
-      assert(sent.count(_.startsWith("(pop)")) == 4)
+      assert(sent.count(_.startsWith("(pop)")) == 5)
+    }
+  }
+
+  test("A scope that is not sent separates assertions, and nothing else") {
+    withProver { prover =>
+      prover.emit("(declare-const x Int)")
+      assert(!prover.assert("(> x 0)", None))
+      val before = prover.sent.length
+      def sent = prover.sent.drop(before).filterNot(_.startsWith("(set-option"))
+
+      /* No assertion precedes the scope, so no empty scope is sent for it */
+      prover.push()
+      prover.assume("(> x 5)")
+      prover.pop()
+      assert(!prover.assert("(> x 0)", None))
+      assert(sent.count(_.startsWith("(push)")) == 1)
+
+      /* Several scopes after one assertion are sent as one empty scope */
+      prover.assume("(> x 0)")
+      prover.push()
+      prover.push()
+      prover.pop()
+      prover.pop()
+      prover.push()
+      prover.pop()
+      prover.assume("(> x 1)")
+      val mark = sent.length
+      assert(prover.assert("(> x 0)", None))
+      assert(sent.drop(mark).take(4) == Vector("(assert (> x 0))", "(push) ; 1", "(pop) ; 1", "(assert (> x 1))"))
+
+      /* A scope that was sent takes the boundaries inside it along when it is popped */
+      prover.push()
+      prover.assume("(> x 2)")
+      assert(prover.assert("(> x 1)", None))
+      val later = sent.length
+      prover.assume("(> x 3)")
+      prover.push()
+      prover.pop()
+      prover.pop()
+      assert(sent.drop(later) == Vector("(pop) ; 1"))
     }
   }
 
