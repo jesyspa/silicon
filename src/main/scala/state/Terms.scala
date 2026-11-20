@@ -17,6 +17,7 @@ import viper.silicon.verifier.Verifier
 import viper.silver.utility.Common.Rational
 
 import scala.collection.concurrent.TrieMap
+import scala.util.hashing.MurmurHash3
 import scala.collection.immutable
 
 sealed trait Node {
@@ -517,23 +518,24 @@ trait ConditionalFlyweight[T, V] { self: AnyRef =>
   // The single value or tuple of values that define equality
   val equalityDefiningMembers: T
 
+  /* The structural hash mixes in the class. Hashing only the members would give a unary term the hash of
+   * its operand, and all binary terms over the same operands the same hash. Snapshot projections then
+   * collide in bulk: every First/Second path below one snapshot would share a single hash, which turns
+   * hash-based collections of such terms into linear collision chains compared by deep equality. The
+   * class name, unlike the class object, hashes identically in every JVM run.
+   */
   override lazy val hashCode = if (Verifier.config.useFlyweight)
     System.identityHashCode(this)
   else
-    viper.silver.utility.Common.generateHashCode(equalityDefiningMembers)
+    MurmurHash3.finalizeHash(
+      MurmurHash3.mix(this.getClass.getName.hashCode, equalityDefiningMembers.##), 1)
 
   override def equals(other: Any): Boolean = {
-    if (Verifier.config.useFlyweight) {
-      this.eq(other.asInstanceOf[AnyRef])
-    } else {
-      (
-        this.eq(other.asInstanceOf[AnyRef])
-          || (other match {
-          case se: ConditionalFlyweight[T, V] if this.getClass.eq(se.getClass) =>
-            equalityDefiningMembers == se.equalityDefiningMembers
-          case _ => false
-        }))
-    }
+    this.eq(other.asInstanceOf[AnyRef]) || (!Verifier.config.useFlyweight && (other match {
+      case se: ConditionalFlyweight[T, V] if this.getClass.eq(se.getClass) =>
+        equalityDefiningMembers == se.equalityDefiningMembers
+      case _ => false
+    }))
   }
 
   override lazy val toString: String = {
