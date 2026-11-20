@@ -245,6 +245,17 @@ object HeapDepFun extends CondFlyweightFactory[(Identifier, Seq[Sort], Sort), He
 class DomainFun private[terms] (val id: Identifier, val argSorts: Seq[Sort], val resultSort: Sort)
     extends ConditionalFlyweight[(Identifier, Seq[Sort], Sort), DomainFun] with GenericFunction[DomainFun] {
 
+  /* A domain function symbol is hashed by its members alone, without its class (see ConditionalFlyweight).
+   * The axiom that makes the unique symbols of a sort distinct lists them in the iteration order of a hash
+   * set, and the time that Z3 needs for later proofs depends on that order. With the order that the mixed
+   * hash gives, Nagini's below-zero and is_happy examples take 7 s and 42 s instead of 1 s and 2 s (medians
+   * over eight seeds). Function symbols do not collide in bulk the way projections of one snapshot do, so
+   * they keep the hash, and with it the order, that such examples were developed against.
+   */
+  override lazy val hashCode: Int =
+    if (Verifier.config.useFlyweight) System.identityHashCode(this)
+    else equalityDefiningMembers.##
+
   def copy(id: Identifier = id, argSorts: Seq[Sort] = argSorts, resultSort: Sort = resultSort) =
     DomainFun(id, argSorts, resultSort)
 }
