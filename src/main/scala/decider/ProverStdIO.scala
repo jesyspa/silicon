@@ -32,6 +32,8 @@ abstract class ProverStdIO(uniqueId: String,
 
   /* protected */ var pushPopScopeDepth = 0
   protected var lastTimeout: Int = -1
+  /* Whether a command was sent whose answer has not been read yet */
+  private var awaitingAnswer = false
   protected var logfileWriter: PrintWriter = _
   protected var prover: Process = _
   protected var proverShutdownHook: Thread = _
@@ -83,6 +85,7 @@ abstract class ProverStdIO(uniqueId: String,
   def dependencies: Seq[SilDefaultDependency]
   def startUpArgs: Seq[String]
 
+  /* The timeout may be [[ProverStdIO.QuickTimeout]] */
   protected def setTimeout(timeout: Option[Int]): Unit
   protected def getProverPath: Path
 
@@ -206,6 +209,19 @@ abstract class ProverStdIO(uniqueId: String,
    */
   def stop(): Unit = {
     this.synchronized {
+      if (ProverStdIO.reportResources && prover != null && !awaitingAnswer && suspendedFromDepth.isEmpty) {
+        /* Deterministic for a given sequence of commands, unlike the time the prover takes */
+        try {
+          output.println("(get-info :rlimit)")
+          output.flush()
+          val msg = s"Prover $uniqueId resources ${input.readLine()}"
+          reporter report InternalWarningMessage(msg)
+          logger info msg
+        } catch {
+          case _: java.io.IOException =>
+        }
+      }
+
       // Detach the resources first, so that a repeated stop() is a no-op and a failing step cannot
       // leave them half-released for a later call.
       val writer = logfileWriter
@@ -402,6 +418,9 @@ abstract class ProverStdIO(uniqueId: String,
 
   def assert(goal: Term, timeout: Option[Int] = None): Boolean =
     assert(termConverter.convert(goal), timeout)
+
+  override def assertQuickly(goal: Term): Boolean =
+    assert(termConverter.convert(goal), Some(ProverStdIO.QuickTimeout))
 
   def assert(goal: String, timeout: Option[Int]): Boolean = {
 //    bookkeeper.assertionCounter += 1
@@ -831,6 +850,7 @@ abstract class ProverStdIO(uniqueId: String,
 
     while (repeat) {
       result = readLineFromInput()
+      awaitingAnswer = false
       if (result.toLowerCase != "success") comment(result)
 
       val warning = result.startsWith("WARNING")
@@ -869,7 +889,10 @@ abstract class ProverStdIO(uniqueId: String,
   protected def writeLine(out: String): Unit = {
     logToFile(out)
     lastCommand = out
-    if (suspendedFromDepth.isEmpty) output.println(out)
+    if (suspendedFromDepth.isEmpty) {
+      awaitingAnswer = true
+      output.println(out)
+    }
   }
 
   override def getModel(): Model = Model(lastModel)
@@ -895,6 +918,14 @@ object ProverStdIO {
   /** Whether provers buffer state-extending commands until they are asked a question;
     * disable with `-Dsilicon.exp.lazySync=false`. */
   def lazySyncEnabled: Boolean = System.getProperty("silicon.exp.lazySync", "true") != "false"
+
+  /** A timeout that stands for the small budget of [[Prover.assertQuickly]], see [[ProverStdIO.setTimeout]] */
+  val QuickTimeout: Int = -2
+
+  /** MEASUREMENT: -Dsilicon.exp.reportProverResources=true prints the resource count of each prover when
+    * it is stopped.
+    */
+  def reportResources: Boolean = java.lang.Boolean.getBoolean("silicon.exp.reportProverResources")
 
   private[silicon] def parseQuantifierProfile(line: String): Option[QuantifierInstantiationsMessage] = {
     val fields = line.stripPrefix("[quantifier_instances]").split(":", -1).map(_.trim)

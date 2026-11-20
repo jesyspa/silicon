@@ -63,6 +63,11 @@ class Z3ProverStdIO(uniqueId: String,
       }
     }
 
+    /* A quick query gets the resources of a tenth of a millisecond, see [[assertQuickly]]. Z3 refutes most
+     * goals that it refutes at all within that budget, and gives up on the others about as fast.
+     */
+    val quick = effectiveTimeout == ProverStdIO.QuickTimeout
+
     /* [2015-07-27 Malte] Setting the timeout unnecessarily often seems to
      * worsen performance, if only a bit. For the current test suite of
      * 199 Silver files, the total verification time increased from 60s
@@ -72,9 +77,12 @@ class Z3ProverStdIO(uniqueId: String,
       lastTimeout = effectiveTimeout
 
       if (!Verifier.config.proverEnableTimeBounds()) {
-        writeLine(s"(set-option :rlimit ${effectiveTimeout.toLong * Verifier.config.z3ResourcesPerMillisecond()})")
+        val resources =
+          if (quick) (Verifier.config.z3ResourcesPerMillisecond() / 10).max(1).toLong
+          else effectiveTimeout.toLong * Verifier.config.z3ResourcesPerMillisecond()
+        writeLine(s"(set-option :rlimit $resources)")
       } else {
-        writeLine(s"(set-option :timeout $effectiveTimeout)")
+        writeLine(s"(set-option :timeout ${if (quick) 1 else effectiveTimeout})")
       }
       readSuccess()
     }

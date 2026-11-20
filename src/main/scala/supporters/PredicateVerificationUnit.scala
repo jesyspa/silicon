@@ -96,6 +96,7 @@ trait DefaultPredicateVerificationUnitProvider extends VerifierComponent { v: Ve
       decider.prover.comment("%s %s %s".format("-" * 10, predicate.name, "-" * 10))
 
       openSymbExLogger(predicate)
+      decider.restoreOptionalCheckAllowance()
 
       val ins = predicate.formalArgs.map(_.localVar)
       val snap = freshSnap(sorts.Snap, v)

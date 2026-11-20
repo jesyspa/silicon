@@ -305,7 +305,7 @@ object evaluator extends EvaluationRules {
         val uidCondExp = v.symbExLog.openScope(condExpRecord)
         eval(s, e0, pve, v)((s1, t0, e0New, v1) =>
           joiner.join[(Term, Option[ast.Exp]), (Term, Option[ast.Exp])](s1, v1)((s2, v2, QB) =>
-            brancher.branch(s2.copy(parallelizeBranches = false), t0, (e0, e0New), v2)(
+            brancher.branch(s2.copy(parallelizeBranches = false), t0, (e0, e0New), v2, joined = true)(
               (s3, v3) => eval(s3.copy(parallelizeBranches = s2.parallelizeBranches), e1, pve, v3)((s4, t4, e4, v4) => QB(s4, (t4, e4), v4)),
               (s3, v3) => eval(s3.copy(parallelizeBranches = s2.parallelizeBranches), e2, pve, v3)((s4, t4, e4, v4) => QB(s4, (t4, e4), v4)))
           )(entries => {
@@ -1127,7 +1127,7 @@ object evaluator extends EvaluationRules {
                          : VerificationResult = {
 
     joiner.join[(Term, Option[ast.Exp]), (Term, Option[ast.Exp])](s, v)((s1, v1, QB) =>
-      brancher.branch(s1.copy(parallelizeBranches = false), tLhs, eLhs, v1, fromShortCircuitingAnd = fromShortCircuitingAnd)(
+      brancher.branch(s1.copy(parallelizeBranches = false), tLhs, eLhs, v1, fromShortCircuitingAnd = fromShortCircuitingAnd, joined = true)(
         (s2, v2) => eval(s2.copy(parallelizeBranches = s1.parallelizeBranches), eRhs, pve, v2)((s2, tRhs, eRhsNew, v2) => QB(s2, (tRhs, eRhsNew), v2)),
         (s2, v2) => QB(s2.copy(parallelizeBranches = s1.parallelizeBranches), (True, Option.when(debugOn)(ast.TrueLit()())), v2))
     )(entries => {

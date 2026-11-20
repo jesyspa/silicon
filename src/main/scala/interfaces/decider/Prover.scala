@@ -44,6 +44,11 @@ trait ProverLike {
 trait Prover extends ProverLike with StatefulComponent {
   def start(userArgsString: Option[String]): Unit
   def assert(goal: Term, timeout: Option[Int] = None): Boolean
+
+  /** Like [[assert]], but with a budget so small that the answer costs little even if the prover cannot
+    * establish the goal. For questions that are worth asking only if they are answered quickly.
+    */
+  def assertQuickly(goal: Term): Boolean = assert(goal, Some(1))
   def check(timeout: Option[Int] = None): Result
   def fresh(id: String, argSorts: Seq[Sort], resultSort: Sort): Function
   def statistics(): Map[String, String]

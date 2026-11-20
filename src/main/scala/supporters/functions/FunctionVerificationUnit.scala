@@ -164,6 +164,7 @@ trait DefaultFunctionVerificationUnitProvider extends VerifierComponent { v: Ver
       v.decider.setProverOptions(proverOptions)
 
       openSymbExLogger(function)
+      decider.restoreOptionalCheckAllowance()
 
       val data = functionData(function.name)
       data.formalArgs.values foreach (v => decider.prover.declare(ConstDecl(v)))

@@ -52,6 +52,7 @@ trait DefaultMethodVerificationUnitProvider extends VerifierComponent { v: Verif
       v.decider.setProverOptions(proverOptions)
 
       openSymbExLogger(method)
+      decider.restoreOptionalCheckAllowance()
 
       val pres = method.pres
       val posts = method.posts

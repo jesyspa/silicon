@@ -40,7 +40,9 @@ class Cvc5ProverStdIO(uniqueId: String,
   val randomizeSeedsOptions: Seq[String] = Cvc5ProverStdIO.randomizeSeedsOptions
 
   protected def setTimeout(timeout: Option[Int]): Unit = {
-    val effectiveTimeout = timeout.getOrElse(Verifier.config.proverTimeout)
+    val requestedTimeout = timeout.getOrElse(Verifier.config.proverTimeout)
+    /* A quick query gets the budget of a millisecond, see [[assertQuickly]] */
+    val effectiveTimeout = if (requestedTimeout == ProverStdIO.QuickTimeout) 1 else requestedTimeout
 
     if (lastTimeout != effectiveTimeout) {
       lastTimeout = effectiveTimeout

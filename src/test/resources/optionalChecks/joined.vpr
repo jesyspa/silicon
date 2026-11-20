@@ -1,0 +1,16 @@
+// Any copyright is dedicated to the Public Domain.
+// http://creativecommons.org/publicdomain/zero/1.0/
+
+// Each conditional expression branches on an unconstrained condition, so both of its feasibility checks fail
+
+method first(a: Bool, b: Bool, c: Bool, d: Bool) returns (r: Int)
+  ensures r >= 4
+{
+  r := (a ? 1 : 2) + (b ? 1 : 2) + (c ? 1 : 2) + (d ? 1 : 2)
+}
+
+method second(a: Bool, b: Bool, c: Bool, d: Bool) returns (r: Int)
+  ensures r <= 8
+{
+  r := (a ? 1 : 2) + (b ? 1 : 2) + (c ? 1 : 2) + (d ? 1 : 2)
+}

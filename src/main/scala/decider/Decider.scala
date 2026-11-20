@@ -32,6 +32,17 @@ import scala.collection.mutable
  * Interfaces
  */
 
+object Decider {
+  /** The number of optional checks per member that may fail with the full budget of a check, see
+    * [[Decider.checkOptional]]. A member that fails fewer optional checks is verified exactly as if such
+    * checks always had the full budget, which matters because the prover's behaviour on later queries depends
+    * on the queries that preceded them. Members that fail many optional checks - hundreds or thousands in
+    * programs with large specifications - no longer spend most of their prover time on them.
+    * Set with `-Dsilicon.exp.optionalCheckAllowance=N`.
+    */
+  def optionalCheckAllowance: Int = Integer.getInteger("silicon.exp.optionalCheckAllowance", 16)
+}
+
 trait Decider {
   def functionDecls: Set[FunctionDecl]
 
@@ -69,6 +80,25 @@ trait Decider {
   def assume(terms: Iterable[Term], debugExp: Option[DebugExp], enforceAssumption: Boolean): Unit
 
   def check(t: Term, timeout: Int): Boolean
+
+  /** Like [[check]], but with the small budget of [[Prover.assertQuickly]] */
+  def checkQuickly(t: Term): Boolean
+
+  /** Checks a fact that verification does not need, but that saves work if it holds, such as that a branch
+    * is infeasible whose result is joined with that of the other branch right away. The prover usually
+    * establishes such a fact quickly if at all, whereas a check that fails takes its whole budget. Per
+    * member, only [[Decider.optionalCheckAllowance]] such checks may fail with the budget of `timeout`;
+    * from then on they get the small budget of [[checkQuickly]].
+    */
+  def checkOptional(t: Term, timeout: Int): Boolean
+
+  /** The number of optional checks that failed since the allowance was last restored, see [[checkOptional]] */
+  def failedOptionalChecks: Int
+
+  /** To be called before a member is verified, see [[checkOptional]]. A decider that takes over a branch
+    * from another one continues with the number of failed checks that the other one had at the branch.
+    */
+  def restoreOptionalCheckAllowance(failedChecks: Int = 0): Unit
 
   /* TODO: Consider changing assert such that
    *         1. It passes State and Operations to the continuation
@@ -235,6 +265,12 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
     }
 
     def stop(): Unit = {
+      if (ProverStdIO.reportResources && optionalCheckStats != ((0, 0, 0))) {
+        val msg = s"Decider $uniqueId failed optional checks $optionalCheckStats"
+        reporter report InternalWarningMessage(msg)
+        logger info msg
+        optionalCheckStats = (0, 0, 0)
+      }
       if (skippedChecks > 0) {
         val msg = s"Decider $uniqueId skipped $skippedChecks contradicted checks"
         reporter report InternalWarningMessage(msg)
@@ -392,7 +428,34 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
       prover.check(timeout) == Unsat
     }
 
-    def check(t: Term, timeout: Int): Boolean = {
+    def check(t: Term, timeout: Int): Boolean = check(t, Some(timeout), quickly = false)
+
+    def checkQuickly(t: Term): Boolean = check(t, None, quickly = true)
+
+    private val optionalCheckAllowance: Int = Decider.optionalCheckAllowance
+    private var _failedOptionalChecks = 0
+    private var proverAsked = false
+    /* MEASUREMENT: failed optional checks with the full budget, with the small budget, and the most per member */
+    private var optionalCheckStats = (0, 0, 0)
+
+    def failedOptionalChecks: Int = _failedOptionalChecks
+
+    def restoreOptionalCheckAllowance(failedChecks: Int = 0): Unit = _failedOptionalChecks = failedChecks
+
+    def checkOptional(t: Term, timeout: Int): Boolean = {
+      val full = _failedOptionalChecks < optionalCheckAllowance
+      proverAsked = false
+      val holds = if (full) check(t, timeout) else checkQuickly(t)
+      if (!holds && proverAsked) {
+        _failedOptionalChecks += 1
+        val (fullFailed, quickFailed, most) = optionalCheckStats
+        optionalCheckStats =
+          (fullFailed + (if (full) 1 else 0), quickFailed + (if (full) 0 else 1), most.max(_failedOptionalChecks))
+      }
+      holds
+    }
+
+    private def check(t: Term, timeout: Option[Int], quickly: Boolean): Boolean = {
       /* If the negation of t is assumed, then t holds only if the path conditions are inconsistent. A check
        * is allowed to fail in that case, which saves a costly query that usually ends in unknown.
        */
@@ -404,7 +467,7 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
         skippedChecks += 1
         false
       } else {
-        deciderAssert(t, Some(timeout))
+        deciderAssert(t, timeout, quickly)
       }
     }
 
@@ -426,12 +489,12 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
       Q(success)
     }
 
-    private def deciderAssert(t: Term, timeout: Option[Int]) = {
+    private def deciderAssert(t: Term, timeout: Option[Int], quickly: Boolean = false) = {
       val assertRecord = new DeciderAssertRecord(t, timeout)
       val sepIdentifier = symbExLog.openScope(assertRecord)
 
       val asserted = isKnownToBeTrue(t)
-      val result = asserted || proverAssert(t, timeout)
+      val result = asserted || proverAssert(t, timeout, quickly)
 
       symbExLog.closeScope(sepIdentifier)
       result
@@ -445,11 +508,12 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
       case _ => false
     }
 
-    private def proverAssert(t: Term, timeout: Option[Int]) = {
+    private def proverAssert(t: Term, timeout: Option[Int], quickly: Boolean = false) = {
       val assertRecord = new ProverAssertRecord(t, timeout)
       val sepIdentifier = symbExLog.openScope(assertRecord)
 
-      val result = prover.assert(t, timeout)
+      proverAsked = true
+      val result = if (quickly) prover.assertQuickly(t) else prover.assert(t, timeout)
 
       symbExLog.whenEnabled {
         assertRecord.statistics = Some(symbExLog.deltaStatistics(prover.statistics()))

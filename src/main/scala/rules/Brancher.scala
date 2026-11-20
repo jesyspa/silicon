@@ -25,7 +25,8 @@ trait BranchingRules extends SymbolicExecutionRules {
              condition: Term,
              conditionExp: (ast.Exp, Option[ast.Exp]),
              v: Verifier,
-             fromShortCircuitingAnd: Boolean = false)
+             fromShortCircuitingAnd: Boolean = false,
+             joined: Boolean = false)
             (fTrue: (State, Verifier) => VerificationResult,
              fFalse: (State, Verifier) => VerificationResult)
             : VerificationResult
@@ -36,7 +37,8 @@ object brancher extends BranchingRules {
              condition: Term,
              conditionExp: (ast.Exp, Option[ast.Exp]),
              v: Verifier,
-             fromShortCircuitingAnd: Boolean = false)
+             fromShortCircuitingAnd: Boolean = false,
+             joined: Boolean = false)
             (fThen: (State, Verifier) => VerificationResult,
              fElse: (State, Verifier) => VerificationResult)
             : VerificationResult = {
@@ -60,16 +62,24 @@ object brancher extends BranchingRules {
           && allQuantifiedVariables.map(_._1).exists(condition.freeVariables.contains))
     )
 
+    /* If the caller joins both branches right after evaluating an expression in each of them, then exploring
+     * an infeasible branch costs little, and the feasibility check is optional: it is only worth making while
+     * it is cheap. See Decider.checkOptional.
+     */
+    def infeasible(negatedBranchCondition: Term): Boolean =
+      if (joined) v.decider.checkOptional(negatedBranchCondition, Verifier.config.checkTimeout())
+      else v.decider.check(negatedBranchCondition, Verifier.config.checkTimeout())
+
     /* True if the then-branch is to be explored */
     val executeThenBranch = (
          skipPathFeasibilityCheck
-      || !v.decider.check(negatedCondition, Verifier.config.checkTimeout()))
+      || !infeasible(negatedCondition))
 
     /* False if the then-branch is to be explored */
     val executeElseBranch = (
          !executeThenBranch /* Assumes that ast least one branch is feasible */
       || skipPathFeasibilityCheck
-      || !v.decider.check(condition, Verifier.config.checkTimeout()))
+      || !infeasible(condition))
 
     val parallelizeElseBranch = s.parallelizeBranches && executeThenBranch && executeElseBranch
 
@@ -99,6 +109,7 @@ object brancher extends BranchingRules {
     var macrosOfElseBranchDecider: Seq[MacroDecl] = null
     var pcsForElseBranch: PathConditionStack = null
     var noOfErrors = 0
+    var failedOptionalChecks = 0
 
     val elseBranchVerificationTask: Verifier => VerificationResult =
       if (executeElseBranch) {
@@ -116,6 +127,7 @@ object brancher extends BranchingRules {
           proverConfigArgsOfCurrentDecider = v.decider.getProverOptions()
           pcsForElseBranch = v.decider.pcs.duplicate()
           noOfErrors = v.errorsReportedSoFar.get()
+          failedOptionalChecks = v.decider.failedOptionalChecks
         }
 
         (v0: Verifier) => {
@@ -142,6 +154,7 @@ object brancher extends BranchingRules {
             v0.decider.prover.comment(s"Taking path conditions from source verifier ${v.uniqueId}")
             v0.decider.setPcs(pcsForElseBranch)
             v0.errorsReportedSoFar.set(noOfErrors)
+            v0.decider.restoreOptionalCheckAllowance(failedOptionalChecks)
           }
           elseBranchVerifier = v0.uniqueId
 
