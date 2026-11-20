@@ -470,6 +470,8 @@ private[decider] class LayeredPathConditionStack
        with Cloneable {
 
   /* private */ var layers: Stack[PathConditionStackLayer] = Stack.empty
+  /* The length of layers, which is a linked list */
+  private var layerCount = 0
   private var markToLength: Map[Mark, Int] = Map.empty
   private var scopeMarks: List[Mark] = List.empty
   private var markCounter = new Counter(0)
@@ -543,11 +545,12 @@ private[decider] class LayeredPathConditionStack
   private def pushLayer(): Mark = {
     val mark = markCounter.next()
 
-    markToLength += (mark -> layers.length)
+    markToLength += (mark -> layerCount)
 
     val debugExpStackTmp = if (layers.nonEmpty && Verifier.config.enableDebugging()) layers.head.debugExpStack else Stack.empty
 
     layers = new PathConditionStackLayer() +: layers
+    layerCount += 1
 
     layers.head.debugExpStack = debugExpStackTmp
     if (debugExpStackTmp.nonEmpty) layers.head.inheritedDebugExps = InsertionOrderedSet(debugExpStackTmp.flatten)
@@ -561,7 +564,7 @@ private[decider] class LayeredPathConditionStack
 
   private def popLayersAndRemoveMark(mark: Mark): Unit = {
     val targetLength = markToLength(mark)
-    val dropLength = layers.length - targetLength
+    val dropLength = layerCount - targetLength
 
     markToLength = markToLength - mark
 
@@ -581,6 +584,7 @@ private[decider] class LayeredPathConditionStack
          * dropping the last layer that needs to be dropped.
          */
       }).tail
+    layerCount -= dropLength.max(1)
   }
 
   def branchConditions: Stack[Term] = layers.flatMap(_.branchCondition)
@@ -632,7 +636,7 @@ private[decider] class LayeredPathConditionStack
   def mark(): Mark = pushLayer()
 
   def after(mark: Mark): RecordedPathConditions = {
-    val afterLength = layers.length - markToLength(mark)
+    val afterLength = layerCount - markToLength(mark)
     val afterLayers = layers.take(afterLength)
 
     new DefaultRecordedPathConditions(afterLayers)
@@ -656,6 +660,7 @@ private[decider] class LayeredPathConditionStack
     /* Mutable data is cloned */
     clonedStack.markCounter = markCounter.clone()
     clonedStack.layers = layers map (_.clone().asInstanceOf[PathConditionStackLayer])
+    clonedStack.layerCount = layerCount
 
     clonedStack
   }

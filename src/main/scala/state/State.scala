@@ -195,7 +195,8 @@ final case class State(g: Store = Store(),
   lazy val relevantQuantifiedVariables: Seq[(Var, Option[ast.AbstractLocalVar])] =
     functionRecorderQuantifiedVariables() ++ packagingWandSnapshots ++ quantifiedVariables
 
-  override val toString = s"${this.getClass.getSimpleName}(...)"
+  /* Not a val: states are copied all the time, and the string is hardly ever needed */
+  override def toString = s"${this.getClass.getSimpleName}(...)"
 }
 
 sealed trait HeapCause

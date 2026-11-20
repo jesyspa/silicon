@@ -18,21 +18,33 @@ trait NameSanitizer {
 }
 
 abstract class AbstractNameSanitizer extends NameSanitizer {
+  /* Whether each ASCII character matches the respective pattern; saves a regex match per character */
+  private lazy val firstAsciiCharacters: Array[Boolean] = asciiMatches(firstCharacters)
+  private lazy val otherAsciiCharacters: Array[Boolean] = asciiMatches(otherCharacters)
+
+  private def asciiMatches(pattern: Regex): Array[Boolean] =
+    Array.tabulate(128)(c => pattern.findFirstIn(c.toChar.toString).isDefined)
+
   def sanitize(name: String): String = {
     assert(name.nonEmpty)
 
     val builder = new StringBuilder
     val first = name.head
 
-    def handle(c: Char, pattern: Regex): Unit = {
-      if (pattern.findFirstIn(c.toString).isDefined)
+    def handle(c: Char, pattern: Regex, asciiMatches: Array[Boolean]): Unit = {
+      val matches = if (c < asciiMatches.length) asciiMatches(c) else pattern.findFirstIn(c.toString).isDefined
+      if (matches)
         builder.append(c)
       else
         builder.append(substitutions.getOrElse(c, fallback))
     }
 
-    handle(first, firstCharacters)
-    for (c <- name.tail) handle(c, otherCharacters)
+    handle(first, firstCharacters, firstAsciiCharacters)
+    var i = 1
+    while (i < name.length) {
+      handle(name.charAt(i), otherCharacters, otherAsciiCharacters)
+      i += 1
+    }
 
     while (reservedNames.contains(builder.result())) {
       builder.append(fallback)
