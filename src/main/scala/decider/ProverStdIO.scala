@@ -67,8 +67,9 @@ abstract class ProverStdIO(uniqueId: String,
    */
   protected var suspendedFromDepth: Option[Int] = None
 
-  /* Lazy synchronisation. Commands that only extend the prover's state - scopes, assumptions, declarations -
-   * are buffered and sent when the prover is next asked a question. A scope that is popped before any
+  /* Lazy synchronisation (`-Dsilicon.exp.lazySync=true`, off by default). Commands that only extend the
+   * prover's state - scopes, assumptions, declarations - are buffered and sent when the prover is next asked
+   * a question. A scope that is popped before any
    * question was asked inside it is never sent: its assumptions are dropped, and its declarations stay
    * buffered, because declarations are global (see the prover configs). Comments stay buffered as well, so
    * that the log keeps them in order, between the commands that were sent.
@@ -78,6 +79,11 @@ abstract class ProverStdIO(uniqueId: String,
    * simplifies an assertion depends on its batch. Without the pushes of the dropped scopes the batches grow,
    * and proofs that are found quickly otherwise can take minutes (Nagini's get_closest_vowel example). When
    * the buffer is sent, a boundary that follows an assertion is therefore sent as an empty scope.
+   *
+   * It is off by default because Z3's search also depends on the assertions that it is never asked about.
+   * Over a corpus of 224 files the prover needs 7% fewer resource units with lazy synchronisation, but three
+   * of VerCors's permutation examples (quick, selection, timsort1) take three to five times as long on most
+   * seeds, and some of their runs exceed a timeout of 120 s.
    */
   protected val lazySync: Boolean = ProverStdIO.lazySyncEnabled
   private val lazySyncBoundaries: Boolean = ProverStdIO.lazySyncBoundaries
@@ -939,12 +945,12 @@ object ProverStdIO {
   private case object PendingBoundary
 
   /** Whether provers buffer state-extending commands until they are asked a question;
-    * disable with `-Dsilicon.exp.lazySync=false`. */
-  def lazySyncEnabled: Boolean = System.getProperty("silicon.exp.lazySync", "true") != "false"
+    * enable with `-Dsilicon.exp.lazySync=true`. */
+  def lazySyncEnabled: Boolean = System.getProperty("silicon.exp.lazySync", "false") != "false"
 
   /** Whether a scope that is never sent still separates the assertions before it from those after it;
-    * `-Dsilicon.exp.lazySync=bare` disables this, for measurements. */
-  def lazySyncBoundaries: Boolean = System.getProperty("silicon.exp.lazySync", "true") != "bare"
+    * `-Dsilicon.exp.lazySync=bare` enables lazy synchronisation without this, for measurements. */
+  def lazySyncBoundaries: Boolean = System.getProperty("silicon.exp.lazySync", "false") != "bare"
 
   /** A timeout that stands for the small budget of [[Prover.assertQuickly]], see [[ProverStdIO.setTimeout]] */
   val QuickTimeout: Int = -2

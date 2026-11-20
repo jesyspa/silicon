@@ -48,9 +48,12 @@ class ProverMemoryOutTests extends AnyFunSuite {
   /* A Z3 prover that answers the commands in [[failOn]] with a memory-out, and the commands in [[replace]]
    * with the given answers, after processing them
    */
-  private class FailingProver(policy: AssertRetryPolicy = AssertRetryPolicy(newSeed = true, boundedFinal = true, contradictionSkip = true))
+  private class FailingProver(policy: AssertRetryPolicy = AssertRetryPolicy(newSeed = true, boundedFinal = true, contradictionSkip = true),
+                              lazySynchronisation: Boolean = false)
     extends Z3ProverStdIO("memoryOut", new TermToSMTLib2Converter,
                                                     new DefaultIdentifierFactory("memoryOut"), NoopReporter) {
+    /* Lazy synchronisation is off by default (`-Dsilicon.exp.lazySync`) */
+    override protected val lazySync: Boolean = lazySynchronisation
     var failOn: List[String] = Nil
     var replace: List[(String, String)] = Nil
     var starts = 0
@@ -94,6 +97,12 @@ class ProverMemoryOutTests extends AnyFunSuite {
 
   private def withProver(body: FailingProver => Unit): Unit = withProver(new FailingProver)(body)
 
+  private def withLazyProver(body: FailingProver => Unit): Unit =
+    withProver(new FailingProver(lazySynchronisation = true))(body)
+
+  /* The modes in which the prover is kept in step with Silicon: at once, or when it is next queried */
+  private val synchronisationModes = Seq(false -> "eager", true -> "lazy")
+
   private def withProver(newProver: => FailingProver, retryOptions: List[String] = List("--assertRetryTimeout", "1500"))
                         (body: FailingProver => Unit): Unit = {
     val backend = new Silicon(List("startedBy" -> s"Unit test ${this.getClass.getSimpleName}"))
@@ -110,8 +119,9 @@ class ProverMemoryOutTests extends AnyFunSuite {
     }
   }
 
-  test("A prover memory-out on a command other than check-sat loses no command") {
-    withProver { prover =>
+  for ((lazySynchronisation, mode) <- synchronisationModes)
+  test(s"A prover memory-out on a command other than check-sat loses no command ($mode synchronisation)") {
+    withProver(new FailingProver(lazySynchronisation = lazySynchronisation)) { prover =>
       prover.emit("(declare-const x Int)")
       /* Z3 rejects a duplicate declaration, so the command must be sent exactly once after the restart */
       prover.failOn = List("(declare-const y Int)")
@@ -137,13 +147,14 @@ class ProverMemoryOutTests extends AnyFunSuite {
     }
   }
 
-  test("A prover that runs out of memory again after a restart is suspended until the scope is popped") {
-    withProver { prover =>
+  for ((lazySynchronisation, mode) <- synchronisationModes)
+  test(s"A prover that runs out of memory again after a restart is suspended until the scope is popped ($mode synchronisation)") {
+    withProver(new FailingProver(lazySynchronisation = lazySynchronisation)) { prover =>
       prover.emit("(declare-const x Int)")
       prover.push()
       prover.assume("(> x 0)")
-      /* The command and its resending after the restart run out of memory. The scope is opened in the
-       * prover when the prover is next queried.
+      /* The command and its resending after the restart run out of memory. With lazy synchronisation the
+       * scope is opened in the prover when the prover is next queried.
        */
       prover.failOn = List("(push) ; 2", "(push) ; 2")
       prover.push()
@@ -163,8 +174,8 @@ class ProverMemoryOutTests extends AnyFunSuite {
     }
   }
 
-  test("Commands reach the prover when it is queried, and a scope that is popped before that does not") {
-    withProver { prover =>
+  test("With lazy synchronisation commands reach the prover when it is queried, and a scope that is popped before that does not") {
+    withLazyProver { prover =>
       /* Part of Silicon's preamble: a declaration outlives the scope in which it is made */
       prover.emit("(set-option :global-decls true)")
       prover.emit("(declare-const x Int)")
@@ -198,8 +209,8 @@ class ProverMemoryOutTests extends AnyFunSuite {
     }
   }
 
-  test("A scope that is not sent separates assertions, and nothing else") {
-    withProver { prover =>
+  test("With lazy synchronisation a scope that is not sent separates assertions, and nothing else") {
+    withLazyProver { prover =>
       prover.emit("(declare-const x Int)")
       assert(!prover.assert("(> x 0)", None))
       val before = prover.sent.length
