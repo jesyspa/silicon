@@ -65,6 +65,16 @@ abstract class ProverStdIO(uniqueId: String,
    */
   protected var suspendedFromDepth: Option[Int] = None
 
+  /* Lazy synchronisation. Commands that only extend the prover's state - scopes, assumptions, declarations -
+   * are buffered and sent when the prover is next asked a question. A scope that is popped before any
+   * question was asked inside it is never sent: its assumptions are dropped, and its declarations stay
+   * buffered, because declarations are global (see the prover configs). Comments stay buffered as well, so
+   * that the log keeps them in order, between the commands that were sent.
+   */
+  protected val lazySync: Boolean = ProverStdIO.lazySyncEnabled
+  private val pending = mutable.ArrayBuffer[AnyRef]() /* String commands and the Pending* entries */
+  private var pendingPushes = 0
+
   var proverPath: Path = _
   var lastReasonUnknown : String = _
   var lastModel : String = _
@@ -117,6 +127,8 @@ abstract class ProverStdIO(uniqueId: String,
     processArgs = userArgsString
     retries = 0
     scopedCommands = Vector(mutable.ArrayBuffer())
+    pending.clear()
+    pendingPushes = 0
     ranOutOfMemorySinceLastCheck = false
     suspendedFromDepth = None
     try {
@@ -231,17 +243,101 @@ abstract class ProverStdIO(uniqueId: String,
   }
 
   def push(n: Int = 1, timeout: Option[Int] = None): Unit = {
+    if (lazySync) {
+      pushPopScopeDepth += n
+      pendingPushes += n
+      var i = 0
+      while (i < n) {
+        pending += ProverStdIO.PendingPush(timeout)
+        i += 1
+      }
+    } else {
+      pushPopScopeDepth += n
+      sendPush(n, timeout)
+    }
+  }
+
+  /* Opens n scopes in the prover; the caller accounts for them in pushPopScopeDepth */
+  private def sendPush(n: Int, timeout: Option[Int]): Unit = {
+    /* Z3 cancels a push if the resource limit of an earlier bounded check is still in force */
     setTimeout(timeout)
-    pushPopScopeDepth += n
-    val cmd = (if (n == 1) "(push)" else "(push " + n + ")") + " ; " + pushPopScopeDepth
+    val cmd = (if (n == 1) "(push)" else "(push " + n + ")") + " ; " + (scopedCommands.length - 1 + n)
     writeLine(cmd)
     readSuccess()
     scopedCommands ++= Vector.fill(n)(mutable.ArrayBuffer[String]())
   }
 
   def pop(n: Int = 1): Unit = {
-    val cmd = (if (n == 1) "(pop)" else "(pop " + n + ")") + " ; " + pushPopScopeDepth
-    pushPopScopeDepth -= n
+    if (lazySync) {
+      var i = 0
+      while (i < n) {
+        if (pendingPushes > 0) {
+          /* The innermost scope was never sent, so there is nothing to pop in the prover */
+          var push = pending.length - 1
+          while (!pending(push).isInstanceOf[ProverStdIO.PendingPush]) push -= 1
+          dropPendingScope(push)
+          pendingPushes -= 1
+          pushPopScopeDepth -= 1
+        } else {
+          /* The innermost scope exists in the prover; what is still buffered belongs to that scope */
+          dropPendingScope(0)
+          pushPopScopeDepth -= 1
+          sendPop(1)
+        }
+        i += 1
+      }
+    } else {
+      pushPopScopeDepth -= n
+      sendPop(n)
+    }
+  }
+
+  /* Removes the buffered entries of the scope that starts at the given index: the push itself, if there is
+   * one at that index, and the assumptions after it. Declarations, other global commands and comments
+   * remain buffered, in order.
+   */
+  private def dropPendingScope(from: Int): Unit = {
+    var kept = from
+    var i = from
+    while (i < pending.length) {
+      val keep = pending(i) match {
+        case cmd: String => !cmd.startsWith("(assert")
+        case _: ProverStdIO.PendingComment => true
+        case _ => false /* a push or an assumption */
+      }
+      if (keep) {
+        pending(kept) = pending(i)
+        kept += 1
+      }
+      i += 1
+    }
+    pending.dropRightInPlace(pending.length - kept)
+  }
+
+  /* Sends everything that is buffered. Must precede any command whose answer depends on the prover's state. */
+  protected def flushPending(): Unit = {
+    if (pending.nonEmpty) {
+      val entries = pending.toArray
+      pending.clear()
+      pendingPushes = 0
+      entries foreach {
+        case cmd: String => sendCommand(cmd)
+        case ProverStdIO.PendingAssume(term) => sendCommand("(assert " + termConverter.convert(term) + ")")
+        case ProverStdIO.PendingPush(timeout) => sendPush(1, timeout)
+        case ProverStdIO.PendingComment(text) => logToFile(text)
+      }
+    }
+  }
+
+  private def sendCommand(cmd: String): Unit = {
+    writeLine(cmd)
+    readSuccess()
+    scopedCommands.last += cmd
+  }
+
+  /* Closes n scopes in the prover; the caller accounts for them in pushPopScopeDepth */
+  private def sendPop(n: Int): Unit = {
+    val cmd = (if (n == 1) "(pop)" else "(pop " + n + ")") + " ; " + (scopedCommands.length - 1)
     writeLine(cmd)
     readSuccess()
     /* Declarations are global (see the prover config), hence only assertions are popped */
@@ -258,14 +354,14 @@ abstract class ProverStdIO(uniqueId: String,
     if (debugMode) {
       allEmits :+= content
     }
-    writeLine(content)
-    readSuccess()
-    scopedCommands.last += content
+    if (lazySync) pending += content
+    else sendCommand(content)
   }
 
   def getAllEmits() : Seq[String] = allEmits
 
   override def setOption(name: String, value: String): String = {
+    flushPending()
     writeLine(s"(get-option :${name})")
     val oldVal = readLine()
     if (oldVal == "unsupported")
@@ -291,16 +387,17 @@ abstract class ProverStdIO(uniqueId: String,
 //      }
 //    })
 
-    assume(termConverter.convert(term))
+    /* A buffered assumption is converted only if it is sent */
+    if (lazySync) pending += ProverStdIO.PendingAssume(term)
+    else assume(termConverter.convert(term))
   }
 
   def assume(term: String): Unit = {
 //    bookkeeper.assumptionCounter += 1
 
     val cmd = "(assert " + term + ")"
-    writeLine(cmd)
-    readSuccess()
-    scopedCommands.last += cmd
+    if (lazySync) pending += cmd
+    else sendCommand(cmd)
   }
 
   def assert(goal: Term, timeout: Option[Int] = None): Boolean =
@@ -308,6 +405,8 @@ abstract class ProverStdIO(uniqueId: String,
 
   def assert(goal: String, timeout: Option[Int]): Boolean = {
 //    bookkeeper.assertionCounter += 1
+
+    flushPending()
 
     val retryTimeout = Verifier.config.assertRetryTimeout()
     val (result, duration) =
@@ -392,7 +491,8 @@ abstract class ProverStdIO(uniqueId: String,
   }
 
   protected def assertUsingPushPop(goal: String, timeout: Option[Int]): (Boolean, Long) = {
-    push()
+    pushPopScopeDepth += 1
+    sendPush(1, None)
     setTimeout(timeout)
 
     writeLine("(assert (not " + goal + "))")
@@ -409,7 +509,8 @@ abstract class ProverStdIO(uniqueId: String,
       if (!lastCheckRanOutOfMemory) updateLastCheckReachedTimeout()
     }
 
-    pop()
+    pushPopScopeDepth -= 1
+    sendPop(1)
 
     (result, endTime - startTime)
   }
@@ -423,6 +524,7 @@ abstract class ProverStdIO(uniqueId: String,
 
   def saturate(timeout: Int, comment: String): Unit = {
     this.comment(s"State saturation: $comment")
+    flushPending()
     setTimeout(Some(timeout))
     writeLine("(check-sat)")
     readCheckSatResult()
@@ -471,10 +573,10 @@ abstract class ProverStdIO(uniqueId: String,
   }
 
   protected def assertUsingSoftConstraints(goal: String, timeout: Option[Int]): (Boolean, Long) = {
-    setTimeout(timeout)
-
     val guard = fresh("grd", Nil, sorts.Bool)
     val guardApp = App(guard, Nil)
+    flushPending()
+    setTimeout(timeout)
 
     val cmd = s"(assert (=> $guardApp (not $goal)))"
     writeLine(cmd)
@@ -495,6 +597,7 @@ abstract class ProverStdIO(uniqueId: String,
   }
 
   def check(timeout: Option[Int] = None): Result = {
+    flushPending()
     setTimeout(timeout)
 
     writeLine("(check-sat)")
@@ -512,6 +615,7 @@ abstract class ProverStdIO(uniqueId: String,
     var stats = scala.collection.immutable.SortedMap[String, String]()
     val entryPattern = """\(?\s*:([A-za-z\-]+)\s+((?:\d+\.)?\d+)\)?""".r
 
+    flushPending()
     writeLine("(get-info :all-statistics)")
 
     do {
@@ -540,7 +644,9 @@ abstract class ProverStdIO(uniqueId: String,
         str.replaceAll("\r", "")
            .replaceAll("\n", "\n; ")
 
-      logToFile("; " + sanitisedStr)
+      /* A comment follows the commands that were issued before it, including buffered ones */
+      if (pending.isEmpty) logToFile("; " + sanitisedStr)
+      else pending += ProverStdIO.PendingComment("; " + sanitisedStr)
     }
   }
 
@@ -781,6 +887,15 @@ abstract class ProverStdIO(uniqueId: String,
 }
 
 object ProverStdIO {
+  /* Buffered entries of the lazy synchronisation, next to plain command strings */
+  private final case class PendingPush(timeout: Option[Int])
+  private final case class PendingAssume(term: Term)
+  private final case class PendingComment(text: String)
+
+  /** Whether provers buffer state-extending commands until they are asked a question;
+    * disable with `-Dsilicon.exp.lazySync=false`. */
+  def lazySyncEnabled: Boolean = System.getProperty("silicon.exp.lazySync", "true") != "false"
+
   private[silicon] def parseQuantifierProfile(line: String): Option[QuantifierInstantiationsMessage] = {
     val fields = line.stripPrefix("[quantifier_instances]").split(":", -1).map(_.trim)
     // Z3 4.16 inserts simplify-true and checker-sat counts before generation and cost.

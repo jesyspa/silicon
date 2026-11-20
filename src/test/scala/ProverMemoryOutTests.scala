@@ -142,12 +142,14 @@ class ProverMemoryOutTests extends AnyFunSuite {
       prover.emit("(declare-const x Int)")
       prover.push()
       prover.assume("(> x 0)")
-      /* The command and its resending after the restart run out of memory */
+      /* The command and its resending after the restart run out of memory. The scope is opened in the
+       * prover when the prover is next queried.
+       */
       prover.failOn = List("(push) ; 2", "(push) ; 2")
       prover.push()
-      assert(prover.failOn.isEmpty)
 
       assert(!prover.assert("(> x 0)", None))
+      assert(prover.failOn.isEmpty)
       assert(prover.ranOutOfMemory())
       prover.pop()
       assert(!prover.assert("(> x 0)", None))
@@ -158,6 +160,38 @@ class ProverMemoryOutTests extends AnyFunSuite {
       assert(prover.assert("(> x 0)", None))
       assert(!prover.assert("(> x 2)", None))
       assert(!prover.ranOutOfMemory())
+    }
+  }
+
+  test("Commands reach the prover when it is queried, and a scope that is popped before that does not") {
+    withProver { prover =>
+      /* Part of Silicon's preamble: a declaration outlives the scope in which it is made */
+      prover.emit("(set-option :global-decls true)")
+      prover.emit("(declare-const x Int)")
+      assert(!prover.assert("(> x 0)", None))
+      val before = prover.sent.length
+      def sent = prover.sent.drop(before).filterNot(_.startsWith("(set-option"))
+
+      prover.push()
+      prover.assume("(> x 0)")
+      prover.push()
+      prover.emit("(declare-const y Int)")
+      prover.assume("(> y x)")
+      prover.pop()
+      assert(sent.isEmpty)
+
+      /* The inner scope is not sent, but its declaration is: declarations are global */
+      assert(prover.assert("(> x (- 1))", None))
+      assert(sent.take(3) == Vector("(push) ; 1", "(assert (> x 0))", "(declare-const y Int)"))
+      assert(!sent.contains("(assert (> y x))"))
+      assert(sent.count(_.startsWith("(push)")) == 2 && sent.count(_.startsWith("(pop)")) == 1)
+
+      /* The outer scope was sent and is therefore popped in the prover */
+      prover.pop()
+      prover.assume("(> y 5)")
+      assert(!prover.assert("(> x 0)", None))
+      assert(prover.assert("(> y 4)", None))
+      assert(sent.count(_.startsWith("(pop)")) == 4)
     }
   }
 
