@@ -479,6 +479,11 @@ private[decider] class LayeredPathConditionStack
   /* Set of assumptions across all layers. Maintained separately to improve performance. */
   private var allAssumptions = InsertionOrderedSet.empty[Term]
 
+  /* The branch conditions of all layers, or null if they have to be collected again. A new layer has no
+   * branch condition, so only setting a condition and popping layers invalidate the list.
+   */
+  private var knownBranchConditions: Stack[Term] = null
+
   pushScope() /* Create an initial layer on the stack */
 
   def setCurrentBranchCondition(condition: Term, conditionExp: (ast.Exp, Option[ast.Exp])): Unit = {
@@ -486,6 +491,7 @@ private[decider] class LayeredPathConditionStack
 
     layers.head.branchCondition = condition
     layers.head.branchConditionExp = conditionExp
+    knownBranchConditions = null
   }
 
   def startDebugSubExp(): Unit = {
@@ -567,6 +573,7 @@ private[decider] class LayeredPathConditionStack
     val dropLength = layerCount - targetLength
 
     markToLength = markToLength - mark
+    knownBranchConditions = null
 
 //    /* Remove marks pointing to popped layers (including mark itself) */
 //    markToLength = markToLength filter (_._2 < targetLength)
@@ -587,7 +594,10 @@ private[decider] class LayeredPathConditionStack
     layerCount -= dropLength.max(1)
   }
 
-  def branchConditions: Stack[Term] = layers.flatMap(_.branchCondition)
+  def branchConditions: Stack[Term] = {
+    if (knownBranchConditions == null) knownBranchConditions = layers.flatMap(_.branchCondition)
+    knownBranchConditions
+  }
 
   override def branchConditionExps: Stack[(ast.Exp, Option[ast.Exp])] = layers.flatMap(_.branchConditionExp)
 

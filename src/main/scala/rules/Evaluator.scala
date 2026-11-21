@@ -120,9 +120,12 @@ object evaluator extends EvaluationRules {
      * evaluation to perform involves consuming or producing permissions, e.g. because of
      * an unfolding expression, these should not be recorded.
      */
-    val s1 = s.copy(h = magicWandSupporter.getEvalHeap(s, v),
-                    reserveHeaps = Nil,
-                    exhaleExt = false)
+    val evalHeap = magicWandSupporter.getEvalHeap(s, v)
+    val s1 =
+      if (!s.exhaleExt && s.reserveHeaps.isEmpty && (evalHeap eq s.h)) s /* The common case: nothing to switch */
+      else s.copy(h = evalHeap,
+                  reserveHeaps = Nil,
+                  exhaleExt = false)
 
     eval2(s1, e, pve, v)((s2, t, eNew, v1) => {
       val s3 =
@@ -136,9 +139,11 @@ object evaluator extends EvaluationRules {
               s2}
         else
           s2
-      val s4 = s3.copy(h = s.h,
-                       reserveHeaps = s.reserveHeaps,
-                       exhaleExt = s.exhaleExt)
+      val s4 =
+        if ((s3.h eq s.h) && (s3.reserveHeaps eq s.reserveHeaps) && s3.exhaleExt == s.exhaleExt) s3
+        else s3.copy(h = s.h,
+                     reserveHeaps = s.reserveHeaps,
+                     exhaleExt = s.exhaleExt)
       Q(s4, t, eNew, v1)})
   }
 

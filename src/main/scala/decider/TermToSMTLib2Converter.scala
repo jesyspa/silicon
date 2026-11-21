@@ -585,6 +585,8 @@ class TermToSMTLib2Converter
   def render(id: Identifier, sanitizeIdentifier: Boolean = true): String = {
     val repr: String = id match {
       case SimpleIdentifier(name) => name
+      /* The name of a suffixed identifier with a simple prefix is this very string, built once per identifier */
+      case SuffixedIdentifier(_: SimpleIdentifier, _, _) => id.name
       case SuffixedIdentifier(prefix, separator, suffix) => s"${render(prefix, false)}$separator$suffix"
       case SortBasedIdentifier(template, sorts) => template.format(sorts.map(convert): _*)
     }

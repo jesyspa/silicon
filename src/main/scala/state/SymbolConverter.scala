@@ -24,6 +24,27 @@ trait SymbolConverter {
 }
 
 class DefaultSymbolConverter extends SymbolConverter {
+  /* The sort of a domain type is named after the printed type. Printing runs the pretty printer, and sorts are
+   * requested for every variable, field and application that is translated, so the sorts are kept. Equality of
+   * domain types ignores their type parameters, which the printed form depends on; an entry is therefore only
+   * used for a type with the same type parameters.
+   */
+  private val domainSorts =
+    new java.util.concurrent.ConcurrentHashMap[ast.DomainType, (Seq[ast.TypeVar], Sort)]()
+
+  private def domainSort(dt: ast.DomainType): Sort = {
+    val known = domainSorts.get(dt)
+
+    if (known != null && ((known._1 eq dt.typeParameters) || known._1 == dt.typeParameters)) {
+      known._2
+    } else {
+      assert(dt.isConcrete, "Expected only concrete domain types, but found " + dt)
+      val sort = sorts.UserSort(Identifier(dt.toString()))
+      domainSorts.put(dt, (dt.typeParameters, sort))
+      sort
+    }
+  }
+
   def toSort(typ: ast.Type): Sort = typ match {
     case ast.Bool => sorts.Bool
     case ast.Int => sorts.Int
@@ -35,9 +56,7 @@ class DefaultSymbolConverter extends SymbolConverter {
     case ast.MultisetType(elementType) => sorts.Multiset(toSort(elementType))
     case ast.MapType(keyType, valueType) => sorts.Map(toSort(keyType), toSort(valueType))
 
-    case dt: ast.DomainType =>
-      assert(dt.isConcrete, "Expected only concrete domain types, but found " + dt)
-      sorts.UserSort(Identifier(dt.toString()))
+    case dt: ast.DomainType => domainSort(dt)
 
     case ast.BackendType(_, interpretations) if interpretations.contains("SMTLIB") => sorts.SMTSort(Identifier(interpretations("SMTLIB")))
     case ast.BackendType(_, _) => sys.error("Found backend type without SMTLIB name.")
