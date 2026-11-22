@@ -15,16 +15,16 @@ the Viper corpus (default `~/data/viper-corpus`). Run the scripts in place; they
 
 ```sh
 export BENCH_DIR=$(mktemp -d /tmp/bot-run.XXXXXXXXXX)
-./build-arms.sh ~/dev/silicon/wip3/silver            # [FULL_REV [BASE_REV]]
+./build-arms.sh SILVER_REPO FULL_REV [BASE_REV]    # use a scratch clone or worktree
 (cd harness && sbt -batch compile)                   # needs $BENCH_DIR/cp-full.txt from build-arms.sh
 ./make-lists.py                                      # subset.txt, warm300.txt
 ```
 
 - `build-arms.sh` adds a detached worktree of the given Silver repository at `$BENCH_DIR/silver-arms`. It then
   builds every arm into `$BENCH_DIR/arms/NAME/classes` and exports the FULL classpath (`cp-full.txt`, `deps.txt`,
-  `deps-shared.txt`, `reflect-jar.txt`). Each arm's `diffstat.txt` shows how it differs from FULL. The arm
-  definitions hard-code commits of the frontend-speedups series (`upstream/frontend-4-whole-program-passes`).
-  To benchmark another series, edit them.
+  `deps-shared.txt`, `reflect-jar.txt`). Each arm's `diffstat.txt` shows how it differs from FULL. There is one
+  `cNN-*` arm per commit between BASE_REV and FULL_REV, built by reverting that commit on FULL, so each commit
+  should be one change. A commit that does not revert cleanly is reported and gets no arm.
 - `make-lists.py` writes `subset.txt`: every corpus file outside `Ru2/`, plus 400 `Ru2/` files picked with seed 1
   (1259 files). It also writes `warm300.txt`, 300 files of the subset used only to warm up the JIT.
 
