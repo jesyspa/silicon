@@ -32,7 +32,7 @@ fi
 build() {
   local name=$1
   if [ -d $S/arms/$name/classes ]; then echo "skip $name"; return; fi
-  if taskset -c $BUILD_CPUS sbt -batch compile > $S/arms/build-$name.log 2>&1; then
+  if taskset -c $BUILD_CPUS sbt -batch compile copyResources > $S/arms/build-$name.log 2>&1; then
     mkdir -p $S/arms/$name && cp -a target/scala-2.13/classes $S/arms/$name/classes
     git diff --stat "$FULL" > $S/arms/$name/diffstat.txt; echo "built $name"
   else echo "FAILED $name"; fi
