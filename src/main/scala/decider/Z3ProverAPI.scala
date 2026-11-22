@@ -8,7 +8,8 @@ package viper.silicon.decider
 
 import com.typesafe.scalalogging.LazyLogging
 import viper.silicon.common.config.Version
-import viper.silicon.interfaces.decider.{Prover, Result, Sat, Unknown, Unsat}
+import viper.silicon.interfaces.decider._
+import viper.silicon.reporting.{ExternalToolError, ProverInteractionFailed}
 import viper.silicon.state.IdentifierFactory
 import viper.silicon.state.terms.{App, Decl, Fun, FunctionDecl, Implies, MacroDecl, Not, Quantification, Sort, SortDecl, SortWrapperDecl, Term, TriggerGenerator, Var, sorts}
 import viper.silicon.{Config, Map}
@@ -20,8 +21,6 @@ import java.nio.file.Path
 import scala.collection.mutable
 import com.microsoft.z3._
 import com.microsoft.z3.enumerations.Z3_param_kind
-import viper.silicon.reporting.ExternalToolError
-import viper.silicon.reporting.ProverInteractionFailed
 
 import scala.jdk.CollectionConverters.MapHasAsJava
 import scala.util.Random
@@ -318,15 +317,19 @@ class Z3ProverAPI(uniqueId: String,
   protected def assertUsingPushPop(goal: Term, timeout: Option[Int]): (Boolean, Long) = {
     endPreamblePhase()
     push()
-    setTimeout(timeout)
+    val (res, startTime, endTime) = try {
+      setTimeout(timeout)
 
-    val negatedGoal = ctx.mkNot(termConverter.convert(goal).asInstanceOf[BoolExpr])
-    prover.add(negatedGoal)
-    val startTime = System.currentTimeMillis()
-    val res = prover.check()
-    val endTime = System.currentTimeMillis()
+      val negatedGoal = ctx.mkNot(termConverter.convert(goal).asInstanceOf[BoolExpr])
+      prover.add(negatedGoal)
+      val startTime = System.currentTimeMillis()
+      val res = prover.check()
+      (res, startTime, System.currentTimeMillis())
+    } finally {
+      pop()
+    }
+
     val result = res == Status.UNSATISFIABLE
-    pop()
 
     if (!result) {
       retrieveAndSaveModel()

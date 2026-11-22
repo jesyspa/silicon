@@ -117,7 +117,6 @@ trait DefaultPredicateVerificationUnitProvider extends VerifierComponent { v: Ve
 
       var branchResults: Seq[(Seq[Term], Seq[(ast.Exp, Option[ast.Exp])], Heap, InsertionOrderedSet[Term])] = Seq()
 
-
       val result = predicate.body match {
         case None =>
           Success()
@@ -125,7 +124,7 @@ trait DefaultPredicateVerificationUnitProvider extends VerifierComponent { v: Ve
           /*    locallyXXX {
                 magicWandSupporter.checkWandsAreSelfFraming(σ.γ, σ.h, predicate, c)}
           &&*/  executionFlowController.locally(s0, v)((s1, _) => {
-                  produce(s1, toSf(snap), body, err, v)((s2, v2) => {
+                  produce(s1, toSf(snap), body, err, v, v.decider.defaultAnalysisInfos)((s2, v2) => {
                     val branchConds = v2.decider.pcs.branchConditions.reverse
                     val branchCondExps = v2.decider.pcs.branchConditionExps.reverse
                     assert(branchConds.length == branchCondExps.length)

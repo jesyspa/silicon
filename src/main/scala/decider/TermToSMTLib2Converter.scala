@@ -10,8 +10,9 @@ import scala.collection.mutable
 import viper.silver.ast
 import viper.silver.components.StatefulComponent
 import viper.silicon.interfaces.decider.TermConverter
-import viper.silicon.state.{Identifier, MagicWandIdentifier, SimpleIdentifier, SortBasedIdentifier, SuffixedIdentifier}
 import viper.silicon.state.terms._
+import viper.silicon.state.chunks.MagicWandIdentifier
+import viper.silicon.state.{Identifier, SimpleIdentifier, SortBasedIdentifier, SuffixedIdentifier}
 
 /** Renders terms, sorts and declarations as SMT-LIB 2 text.
   *

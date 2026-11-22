@@ -11,15 +11,14 @@ import java.nio.file.Path
 import java.util.concurrent.TimeUnit
 import com.typesafe.scalalogging.LazyLogging
 import viper.silicon.common.config.Version
-import viper.silicon.interfaces.decider.{Prover, Result, Sat, Unknown, Unsat}
+import viper.silicon.interfaces.decider._
 import viper.silicon.reporting.{ExternalToolError, ProverInteractionFailed}
 import viper.silicon.state.IdentifierFactory
 import viper.silicon.state.terms._
 import viper.silicon.verifier.{Cleanup, Verifier}
-import viper.silver.verifier.{DefaultDependency => SilDefaultDependency}
 import viper.silicon.{Config, Map, toMap}
 import viper.silver.reporter.{ConfigurationConfirmation, InternalWarningMessage, QuantifierInstantiationsMessage, Reporter}
-import viper.silver.verifier.Model
+import viper.silver.verifier.{Model, DefaultDependency => SilDefaultDependency}
 
 import scala.collection.mutable
 
@@ -89,6 +88,7 @@ abstract class ProverStdIO(uniqueId: String,
   private val lazySyncBoundaries: Boolean = ProverStdIO.lazySyncBoundaries
   private val pending = mutable.ArrayBuffer[AnyRef]() /* String commands and the Pending* entries */
   private var pendingPushes = 0
+  protected var proverLabelId: Int = 0
 
   var proverPath: Path = _
   var lastReasonUnknown : String = _
@@ -355,8 +355,8 @@ abstract class ProverStdIO(uniqueId: String,
         case cmd: String =>
           sendCommand(cmd)
           if (cmd.startsWith("(assert")) unprocessedAssertions = true
-        case ProverStdIO.PendingAssume(term) =>
-          sendCommand("(assert " + termConverter.convert(term) + ")")
+        case ProverStdIO.PendingAssume(term, name) =>
+          sendCommand(assertCommand(termConverter.convert(term), name))
           unprocessedAssertions = true
         case ProverStdIO.PendingPush(timeout) =>
           sendPush(1, timeout)
@@ -429,27 +429,56 @@ abstract class ProverStdIO(uniqueId: String,
 //        problems.foreach(p => quantificationLogger.println(s"  $p"))
 //      }
 //    })
-
-    /* A buffered assumption is converted only if it is sent */
-    if (lazySync) pending += ProverStdIO.PendingAssume(term)
-    else assume(termConverter.convert(term))
+    assumeTerm(term, None)
   }
 
-  def assume(term: String): Unit = {
+  /* A buffered assumption is converted only if it is sent */
+  protected def assumeTerm(term: Term, label: Option[String]): Unit = {
+    if (lazySync) pending += ProverStdIO.PendingAssume(term, proverLabel(label))
+    else assumeInternal(termConverter.convert(term), label)
+  }
+
+  def nextProverLabel(): String = {
+    val label = "prover_" + proverLabelId
+    proverLabelId += 1
+    label
+  }
+
+  protected def assumeInternal(term: String, label: Option[String]): Unit = {
 //    bookkeeper.assumptionCounter += 1
 
-    val cmd = "(assert " + term + ")"
+    val cmd = assertCommand(term, proverLabel(label))
     if (lazySync) pending += cmd
     else sendCommand(cmd)
   }
 
+  /* The name of an assertion: the given label, or a fresh one if unsat cores are enabled */
+  private def proverLabel(label: Option[String]): Option[String] =
+    label.orElse(Option.when(Verifier.config.enableUnsatCores())(nextProverLabel()))
+
+  private def assertCommand(term: String, name: Option[String]): String = name match {
+    case Some(n) => "(assert (! " + term + " :named " + n + "))"
+    case None => "(assert " + term + ")"
+  }
+
+  private def writeAssert(term: String, name: Option[String]): Unit = {
+    writeLine(assertCommand(term, name))
+    readSuccess()
+  }
+
+  /** Assumes an SMT-LIB term */
+  def assume(term: String): Unit = assumeInternal(term, None)
+
   def assert(goal: Term, timeout: Option[Int] = None): Boolean =
-    assert(termConverter.convert(goal), timeout)
+    assertInternal(termConverter.convert(goal), timeout, None)
+
+  /** Asserts an SMT-LIB term */
+  def assert(goal: String, timeout: Option[Int]): Boolean = assertInternal(goal, timeout, None)
 
   override def assertQuickly(goal: Term): Boolean =
-    assert(termConverter.convert(goal), Some(ProverStdIO.QuickTimeout))
+    assertInternal(termConverter.convert(goal), Some(ProverStdIO.QuickTimeout), None)
 
-  def assert(goal: String, timeout: Option[Int]): Boolean = {
+  protected def assertInternal(goal: String, timeout: Option[Int], label: Option[String]): Boolean = {
 //    bookkeeper.assertionCounter += 1
 
     flushPending()
@@ -465,7 +494,7 @@ abstract class ProverStdIO(uniqueId: String,
          */
         isRetryableAttempt = true
         val (firstResult, firstDuration) =
-          try assertInMode(goal, Some(retryPolicy.firstTimeout.getOrElse(retryTimeout)))
+          try assertInMode(goal, Some(retryPolicy.firstTimeout.getOrElse(retryTimeout)), label)
           finally isRetryableAttempt = false
         if (firstResult || lastCheckRanOutOfMemory || !lastCheckReachedTimeout) {
           (firstResult, firstDuration)
@@ -477,7 +506,7 @@ abstract class ProverStdIO(uniqueId: String,
           restartAndReplay()
           val restartDuration = System.currentTimeMillis() - restartStart
           val retryBound = if (retryPolicy.boundedFinal) Some(retryTimeout * ProverStdIO.RetryTimeoutFactor) else None
-          val (retryResult, retryDuration) = assertInMode(goal, retryBound)
+          val (retryResult, retryDuration) = assertInMode(goal, retryBound, label)
           val answer = if (lastCheckRanOutOfMemory) "out of memory" else lastCheckSatAnswer
           val msg = (s"Prover $uniqueId retried an assertion in a fresh prover: first attempt $firstDuration ms, "
                      + s"restart and replay $restartDuration ms, retry $retryDuration ms, answer $answer")
@@ -486,7 +515,7 @@ abstract class ProverStdIO(uniqueId: String,
           (retryResult, firstDuration + retryDuration)
         }
       } else {
-        assertInMode(goal, timeout)
+        assertInMode(goal, timeout, label)
       }
 
     comment(s"${viper.silver.reporter.format.formatMillisReadably(duration)}")
@@ -500,13 +529,13 @@ abstract class ProverStdIO(uniqueId: String,
    */
   protected def retryArgs(args: Option[String], retry: Int): Option[String] = args
 
-  private def assertInMode(goal: String, timeout: Option[Int]): (Boolean, Long) = {
+  private def assertInMode(goal: String, timeout: Option[Int], label: Option[String]): (Boolean, Long) = {
     val profiling = isRetryableAttempt && retryPolicy.profile
     val before = if (profiling) statistics().toString else ""
     val start = if (profiling) System.nanoTime() else 0L
     val result = Verifier.config.assertionMode() match {
       case Config.AssertionMode.SoftConstraints => assertUsingSoftConstraints(goal, timeout)
-      case Config.AssertionMode.PushPop => assertUsingPushPop(goal, timeout)
+      case Config.AssertionMode.PushPop => assertUsingPushPop(goal, timeout, label)
     }
     if (profiling && !lastCheckRanOutOfMemory) {
       val totalMs = (System.nanoTime() - start) / 1000000.0
@@ -536,13 +565,12 @@ abstract class ProverStdIO(uniqueId: String,
     }
   }
 
-  protected def assertUsingPushPop(goal: String, timeout: Option[Int]): (Boolean, Long) = {
+  protected def assertUsingPushPop(goal: String, timeout: Option[Int], label: Option[String]): (Boolean, Long) = {
     pushPopScopeDepth += 1
     sendPush(1, None)
     setTimeout(timeout)
 
-    writeLine("(assert (not " + goal + "))")
-    readSuccess()
+    writeAssert("(not " + goal + ")", proverLabel(label))
 
     val startTime = System.currentTimeMillis()
     writeLine("(check-sat)")
@@ -553,12 +581,24 @@ abstract class ProverStdIO(uniqueId: String,
       retrieveAndSaveModel()
       if (!lastCheckRanOutOfMemory) retrieveReasonUnknown()
       if (!lastCheckRanOutOfMemory) updateLastCheckReachedTimeout()
+    } else if (result) {
+      onUnsat()
     }
 
     pushPopScopeDepth -= 1
     sendPop(1)
 
     (result, endTime - startTime)
+  }
+
+  /**
+   * Invoked right after the prover reported unsat for an assertion checked via push/pop or for a check.
+   */
+  protected def onUnsat(): Unit = {
+    if (Verifier.config.enableUnsatCores()) {
+      writeLine("(get-unsat-core)")
+      readLine()
+    }
   }
 
   def saturate(data: Option[Config.ProverStateSaturationTimeout]): Unit = {
@@ -648,11 +688,16 @@ abstract class ProverStdIO(uniqueId: String,
 
     writeLine("(check-sat)")
 
-    readCheckSatResult() match {
+    val result = readCheckSatResult() match {
       case "sat" => Sat
       case "unsat" => Unsat
       case "unknown" => Unknown
     }
+
+    if (result == Unsat)
+      onUnsat()
+
+    result
   }
 
   def statistics(): Map[String, String] = {
@@ -939,7 +984,7 @@ abstract class ProverStdIO(uniqueId: String,
 object ProverStdIO {
   /* Buffered entries of the lazy synchronisation, next to plain command strings */
   private final case class PendingPush(timeout: Option[Int])
-  private final case class PendingAssume(term: Term)
+  private final case class PendingAssume(term: Term, name: Option[String])
   private final case class PendingComment(text: String)
   /* Where a scope began that was popped before it was sent */
   private case object PendingBoundary

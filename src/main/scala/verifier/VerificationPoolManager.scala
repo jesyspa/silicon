@@ -29,30 +29,41 @@ object VerificationPoolManager {
   val parallelLifecycle: Boolean = !"false".equals(System.getProperty("silicon.exp.parallelLifecycle"))
 }
 
-class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulComponent {
+abstract class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulComponent {
   import VerificationPoolManager._
+
+  /** The type of the workers in this pool, which lets subclasses use the capabilities of their workers without casts. */
+  type Worker >: Null <: WorkerVerifier
+
+  protected def createWorker(): Worker
 
   private val configuredWorkers: Int = Verifier.config.numberOfParallelVerifiers()
   private var numberOfWorkers: Int = configuredWorkers
 
-  /*private*/ var workerVerifiers: Seq[WorkerVerifier] = _
+  /*private*/ var workerVerifiers: Seq[Worker] = _
   /*private*/ var threadPool: ForkJoinPool = _
-  /*private*/ var workerVerifierPool: ObjectPool[WorkerVerifier] = _
+  /*private*/ var workerVerifierPool: ObjectPool[Worker] = _
   /* Each worker has an ordered command stream; preamble sections share one task per stream. */
   private var workerCommands: Seq[ProverCommandQueue] = Seq.empty
   private var broadcastBatchDepth = 0
-  private var batchedCommands = Vector.empty[ProverLike => Unit]
+  private var batchedCommands = Vector.empty[Worker => Unit]
 
-  /** Applies `command` to each worker's prover, in order per worker; under asyncBroadcast, without waiting for it. */
-  private def broadcast(command: ProverLike => Unit): Unit = {
-    if (workerCommands.isEmpty) workerVerifiers foreach (worker => command(worker.decider.prover))
+  /** Applies `command` to each worker, in order per worker; under asyncBroadcast, without waiting for it.
+    * Every command to the workers' provers must go through here, to keep each worker's commands in order.
+    */
+  protected def broadcastToWorkers(command: Worker => Unit): Unit = {
+    if (workerCommands.isEmpty) workerVerifiers foreach command
     else if (broadcastBatchDepth > 0) batchedCommands :+= command
     else submitBroadcast(command)
   }
 
-  private def submitBroadcast(command: ProverLike => Unit): Unit = {
+  /** Applies `command` to each worker's prover, see [[broadcastToWorkers]]. */
+  private def broadcast(command: ProverLike => Unit): Unit =
+    broadcastToWorkers(worker => command(worker.decider.prover))
+
+  private def submitBroadcast(command: Worker => Unit): Unit = {
     workerVerifiers.zip(workerCommands).foreach { case (worker, queue) =>
-      queue.submit(() => command(worker.decider.prover))
+      queue.submit(() => command(worker))
     }
   }
 
@@ -69,7 +80,7 @@ class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulCompon
   private def flushBroadcastBatch(): Unit = {
     val commands = batchedCommands
     batchedCommands = Vector.empty
-    if (commands.nonEmpty) submitBroadcast(prover => commands.foreach(_(prover)))
+    if (commands.nonEmpty) submitBroadcast(worker => commands.foreach(_(worker)))
   }
 
   /** Waits for all queued commands, including failures in earlier batches. */
@@ -78,7 +89,11 @@ class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulCompon
     workerCommands.foreach(_.await())
   }
 
-  private[verifier] object pooledVerifiers extends ProverLike {
+  def pooledVerifiers: DefaultPooledVerifiers = _pooledVerifiers
+
+  private[verifier] object _pooledVerifiers extends DefaultPooledVerifiers
+
+  trait DefaultPooledVerifiers extends ProverLike {
     def emit(content: String): Unit = broadcast(_.emit(content))
     override def emit(contents: Iterable[String]): Unit = broadcast(_.emit(contents))
     def assume(term: Term): Unit = broadcast(_.assume(term))
@@ -129,14 +144,14 @@ class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulCompon
     workerVerifiers = Vector.empty
 
     try {
-      val poolConfig: GenericObjectPoolConfig[WorkerVerifier] = new GenericObjectPoolConfig()
+      val poolConfig: GenericObjectPoolConfig[Worker] = new GenericObjectPoolConfig()
       poolConfig.setMaxTotal(numberOfWorkers)
       poolConfig.setMaxIdle(numberOfWorkers) /* Prevent pool from shutting down idle prover instances */
       poolConfig.setBlockWhenExhausted(true)
 
       val factory = PoolUtils.synchronizedPooledFactory(workerVerifierPoolableObjectFactory)
 
-      workerVerifierPool = new GenericObjectPool[WorkerVerifier](factory, poolConfig)
+      workerVerifierPool = new GenericObjectPool[Worker](factory, poolConfig)
 
       workerVerifierPool.addObjects(poolConfig.getMaxTotal)
 
@@ -195,15 +210,15 @@ class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulCompon
     }
   }
 
-  private object workerVerifierPoolableObjectFactory extends BasePooledObjectFactory[WorkerVerifier] {
-    def create(): WorkerVerifier = {
-      val worker = new WorkerVerifier(mainVerifier, mainVerifier.nextUniqueVerifierId(), mainVerifier.reporter, Verifier.config.enableDebugging())
+  private object workerVerifierPoolableObjectFactory extends BasePooledObjectFactory[Worker] {
+    def create(): Worker = {
+      val worker = createWorker()
       workerVerifiers = worker +: workerVerifiers
 
       worker
     }
 
-    def wrap(arg: WorkerVerifier): PooledObject[WorkerVerifier] = new DefaultPooledObject(arg)
+    def wrap(arg: Worker): PooledObject[Worker] = new DefaultPooledObject(arg)
   }
 
   /* Verification task management */
@@ -252,7 +267,7 @@ class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulCompon
 
   class WorkerBorrowingForkJoinWorkerThread(pool: ForkJoinPool) extends ForkJoinWorkerThread(pool) {
     // each thread has its own worker verifier that does not change.
-    var worker: WorkerVerifier = null
+    var worker: Worker = null
 
     override def onStart(): Unit = {
       worker = workerVerifierPool.borrowObject()
@@ -280,4 +295,8 @@ class VerificationPoolManager(mainVerifier: MainVerifier) extends StatefulCompon
   }
 }
 
+class DefaultVerificationPoolManager(mainVerifier: MainVerifier) extends VerificationPoolManager(mainVerifier) {
+  override type Worker = WorkerVerifier
 
+  override protected def createWorker(): WorkerVerifier = mainVerifier.createWorkerVerifier()
+}

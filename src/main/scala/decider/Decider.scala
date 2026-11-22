@@ -10,6 +10,7 @@ import com.typesafe.scalalogging.Logger
 import viper.silicon.debugger.DebugExp
 import viper.silicon._
 import viper.silicon.common.collections.immutable.InsertionOrderedSet
+import viper.silicon.dependencyAnalysis._
 import viper.silicon.interfaces._
 import viper.silicon.interfaces.decider._
 import viper.silicon.logger.records.data.{DeciderAssertRecord, DeciderAssumeRecord, ProverAssertRecord}
@@ -60,29 +61,43 @@ trait Decider {
   def pushScope(): Unit
   def popScope(): Unit
 
-  def checkSmoke(isAssert: Boolean = false): Boolean
+  def checkSmoke(analysisInfos: AnalysisInfos, isAssert: Boolean = false): Boolean
 
-  def setCurrentBranchCondition(t: Term, te: (ast.Exp, Option[ast.Exp])): Unit
+  def setCurrentBranchCondition(t: Term, te: (ast.Exp, Option[ast.Exp]), analysisInfos: AnalysisInfos): Unit
   def setPathConditionMark(): Mark
 
   def finishDebugSubExp(description : String): Unit
 
   def startDebugSubExp(): Unit
 
-  def assume(t: Term, e: ast.Exp, finalExp: ast.Exp): Unit
-  def assume(t: Term, e: Option[ast.Exp], finalExp: Option[ast.Exp]): Unit
-  def assume(t: Term, debugExp: Option[DebugExp]): Unit
-  def assume(terms: Seq[Term], debugExps: Option[Seq[DebugExp]]): Unit
-  def assumeDefinition(t: Term, debugExp: Option[DebugExp]): Unit
-  def assumeDefinition(terms: Iterable[Term], debugExp: Option[DebugExp]): Unit
-  def assume(assumptions: Iterable[(Term, Option[DebugExp])]): Unit
-  def assume(assumptions: InsertionOrderedSet[(Term, Option[DebugExp])], enforceAssumption: Boolean = false, isDefinition: Boolean = false): Unit
-  def assume(terms: Iterable[Term], debugExp: Option[DebugExp], enforceAssumption: Boolean): Unit
+  def debuggerAssume(terms: Iterable[Term], de: DebugExp)
 
-  def check(t: Term, timeout: Int): Boolean
+  /** The interface for reporting to the analysis of this run, which does nothing if there is none. */
+  def analysisHooks: AnalysisHooks
+
+  /**
+   * Whether dependencies are recorded for the member currently being verified. Always false if the analysis is not
+   * enabled overall (Config#isDependencyAnalysisEnabled).
+   */
+  def isDependencyAnalysisEnabledForMember: Boolean
+
+  def isPathMarkedInfeasible: Boolean
+  def handleInfeasiblePath(hasAssertions: Boolean, hasAssumptions: Boolean, analysisInfos: AnalysisInfos): Unit
+
+  def assume(t: Term, e: Option[ast.Exp], finalExp: Option[ast.Exp], analysisInfos: AnalysisInfos): Unit
+  def assume(t: Term, debugExp: Option[DebugExp], analysisInfos: AnalysisInfos): Unit
+  def assume(terms: Seq[Term], debugExps: Option[Seq[DebugExp]], analysisInfos: AnalysisInfos): Unit
+  def assumeDefinition(terms: Iterable[Term], debugExp: Option[DebugExp], analysisInfos: AnalysisInfos): Unit
+  def assumeDefinition(t: Term, debugExp: Option[DebugExp], analysisInfos: AnalysisInfos): Unit
+  def assume(terms: Iterable[Term], debugExp: Option[DebugExp], enforceAssumption: Boolean, analysisInfos: AnalysisInfos): Unit
+
+  def check(t: Term, timeout: Int, analysisInfos: AnalysisInfos): Boolean
+
+  /** Like `check`, but also returns the id of the dependency analysis node of a successful check, if there is one. */
+  def checkWithNodeId(t: Term, timeout: Int, analysisInfos: AnalysisInfos): (Boolean, Option[Int])
 
   /** Like [[check]], but with the small budget of [[Prover.assertQuickly]] */
-  def checkQuickly(t: Term): Boolean
+  def checkQuickly(t: Term, analysisInfos: AnalysisInfos): Boolean
 
   /** Checks a fact that verification does not need, but that saves work if it holds, such as that a branch
     * is infeasible whose result is joined with that of the other branch right away. The prover usually
@@ -90,7 +105,7 @@ trait Decider {
     * member, only [[Decider.optionalCheckAllowance]] such checks may fail with the budget of `timeout`;
     * from then on they get the small budget of [[checkQuickly]].
     */
-  def checkOptional(t: Term, timeout: Int): Boolean
+  def checkOptional(t: Term, timeout: Int, analysisInfos: AnalysisInfos): Boolean
 
   /** The number of optional checks that failed since the allowance was last restored, see [[checkOptional]] */
   def failedOptionalChecks: Int
@@ -104,7 +119,8 @@ trait Decider {
    *         1. It passes State and Operations to the continuation
    *         2. The implementation reacts to a failing assertion by e.g. a state consolidation
    */
-  def assert(t: Term, timeout: Option[Int] = None)(Q:  Boolean => VerificationResult): VerificationResult
+  def assert(t: Term, analysisInfos: AnalysisInfos)(Q: Boolean => VerificationResult): VerificationResult
+  def assert(t: Term, analysisInfos: AnalysisInfos, timeout: Option[Int])(Q: Boolean => VerificationResult): VerificationResult
 
   def fresh(id: String, sort: Sort, ptype: Option[PType]): Var
   def fresh(id: String, argSorts: Seq[Sort], resultSort: Sort): Function
@@ -134,6 +150,10 @@ trait Decider {
   def setPcs(other: PathConditionStack): Unit
 
   def statistics(): Map[String, String]
+
+  def handleFailedAssertion(failedAssertion: Term, e: Option[ast.Exp], finalExp: Option[ast.Exp], analysisInfos: AnalysisInfos, assumeFailedAssertion: Boolean): Unit
+
+  def defaultAnalysisInfos: AnalysisInfos
 }
 
 /*
@@ -151,9 +171,27 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
      */
   def identifierFactory: IdentifierFactory
 
-  object decider extends Decider with StatefulComponent {
-    private var _prover: Prover = _
-    private var pathConditions: PathConditionStack = _
+  def decider: AbstractDecider = DefaultDecider
+
+  object DefaultDecider extends AbstractDecider {
+    type P = Prover
+
+    override protected def getProver(prover: String): Prover = prover match {
+      case Z3ProverStdIO.name => new Z3ProverStdIO(uniqueId, termConverter, identifierFactory, reporter)
+      case Cvc5ProverStdIO.name => new Cvc5ProverStdIO(uniqueId, termConverter, identifierFactory, reporter)
+      case Z3ProverAPI.name => new Z3ProverAPI(uniqueId, new TermToZ3APIConverter(), identifierFactory, reporter, triggerGenerator)
+      case prover =>
+        val msg1 = s"Unknown prover '$prover' provided. Defaulting to ${Z3ProverStdIO.name}."
+        logger warn msg1
+        getProver(Z3ProverStdIO.name)
+    }
+  }
+
+  trait AbstractDecider extends Decider with StatefulComponent {
+    type P <: Prover
+
+    protected var _prover: P = _
+    protected var pathConditions: PathConditionStack = _
 
     private var _declaredFreshFunctions: Set[FunctionDecl] = _ /* [BRANCH-PARALLELISATION] */
     private var _declaredFreshMacros: Vector[MacroDecl] = _
@@ -165,15 +203,20 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
     private var skippedChecks: Int = 0
     private val contradictionSkip: Boolean = AssertRetryPolicy.current.contradictionSkip
     private val _debuggerAssumedTerms: mutable.Set[Term] = mutable.Set.empty
-    
+
     def functionDecls: Set[FunctionDecl] = _declaredFreshFunctions
     def macroDecls: Vector[MacroDecl] = _declaredFreshMacros
 
-    def prover: Prover = _prover
+    def prover: P = _prover
 
     def pcs: PathConditionStack = pathConditions
 
     var debugVariableTypes : Map[String, PType] = Map.empty
+
+    override def defaultAnalysisInfos: AnalysisInfos = NoopAnalysisInfos
+
+    def analysisHooks: AnalysisHooks = NoAnalysisHooks
+    def isDependencyAnalysisEnabledForMember: Boolean = false
 
     def setPcs(other: PathConditionStack) = {
       /* [BRANCH-PARALLELISATION] */
@@ -189,15 +232,7 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
       })
     }
 
-    private def getProver(prover: String): Prover = prover match {
-      case Z3ProverStdIO.name => new Z3ProverStdIO(uniqueId, termConverter, identifierFactory, reporter)
-      case Cvc5ProverStdIO.name => new Cvc5ProverStdIO(uniqueId, termConverter, identifierFactory, reporter)
-      case Z3ProverAPI.name => new Z3ProverAPI(uniqueId, new TermToZ3APIConverter(), identifierFactory, reporter, triggerGenerator)
-      case prover =>
-        val msg1 = s"Unknown prover '$prover' provided. Defaulting to ${Z3ProverStdIO.name}."
-        logger warn msg1
-        getProver(Z3ProverStdIO.name)
-    }
+    protected def getProver(prover: String): P
 
     def createProver(proverName: String, userArgsString: Option[String]): Option[DependencyNotFoundError] = {
       _prover = getProver(proverName)
@@ -298,9 +333,10 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
       //symbExLog.closeScope(sepIdentifier)
     }
 
-    def setCurrentBranchCondition(t: Term, te: (ast.Exp, Option[ast.Exp])): Unit = {
+    def setCurrentBranchCondition(t: Term, te: (ast.Exp, Option[ast.Exp]), analysisInfos: AnalysisInfos): Unit =
+      if (!isPathMarkedInfeasible) {
       pathConditions.setCurrentBranchCondition(t, te)
-      assume(t, Option.when(te._2.isDefined)(te._1), te._2)
+      assume(t, Option.when(te._2.isDefined)(te._1), te._2, analysisInfos)
     }
 
     def setPathConditionMark(): Mark = pathConditions.mark()
@@ -319,46 +355,50 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
       }
     }
 
+    def isPathMarkedInfeasible: Boolean = Verifier.config.analyzeInfeasiblePaths && pcs.isPathMarkedInfeasible
+
+    /**
+     * Called by [[viper.silicon.rules.InfeasiblePath.canPathBeSkipped]] when a rule skips its usual work because the
+     * current path is known to be infeasible, in order to record what the rule would have contributed to the analysis.
+     * Does nothing here since infeasible paths are only handled if the dependency analysis is enabled; see
+     * DependencyAnalysisAwareDecider.
+     */
+    def handleInfeasiblePath(hasAssertions: Boolean, hasAssumptions: Boolean, analysisInfos: AnalysisInfos): Unit = {}
+
     def addDebugExp(e: DebugExp): Unit = {
       if (debugMode) {
         pathConditions.addDebugExp(e)
       }
     }
 
-    def assume(t: Term, e : ast.Exp, finalExp : ast.Exp): Unit = {
-      assume(assumptions=InsertionOrderedSet((t, Some(DebugExp.createInstance(e, finalExp)))), false, false)
-    }
-
-    def assume(t: Term, e: Option[ast.Exp], finalExp: Option[ast.Exp]): Unit = {
+    def assume(t: Term, e: Option[ast.Exp], finalExp: Option[ast.Exp], analysisInfos: AnalysisInfos): Unit = {
       if (finalExp.isDefined) {
-        assume(assumptions=InsertionOrderedSet((t, Some(DebugExp.createInstance(e.get, finalExp.get)))), false, false)
+        assume(assumptions=InsertionOrderedSet((t, Some(DebugExp.createInstance(e.get, finalExp.get)))), enforceAssumption = false,
+          isDefinition = false, analysisInfos)
       } else {
-        assume(assumptions=InsertionOrderedSet((t, None)), false, false)
+        assume(assumptions=InsertionOrderedSet((t, None)), enforceAssumption = false, isDefinition = false, analysisInfos)
       }
     }
 
-    def assume(t: Term, debugExp: Option[DebugExp]): Unit = {
-      assume(InsertionOrderedSet(Seq((t, debugExp))), false)
+    def assume(t: Term, debugExp: Option[DebugExp], analysisInfos: AnalysisInfos): Unit = {
+      assume(InsertionOrderedSet(Seq((t, debugExp))), enforceAssumption = false, isDefinition = false, analysisInfos)
     }
 
-    def assumeDefinition(t: Term, debugExp: Option[DebugExp]): Unit = {
-      assume(InsertionOrderedSet(Seq((t, debugExp))), enforceAssumption=false, isDefinition=true)
+    def assumeDefinition(t: Term, debugExp: Option[DebugExp], analysisInfos: AnalysisInfos): Unit = {
+      assume(InsertionOrderedSet(Seq((t, debugExp))), enforceAssumption=false, isDefinition=true, analysisInfos)
     }
 
-    def assumeDefinition(terms: Iterable[Term], debugExp: Option[DebugExp]): Unit = {
+    def assumeDefinition(terms: Iterable[Term], debugExp: Option[DebugExp], analysisInfos: AnalysisInfos): Unit = {
       val filteredTerms = terms filterNot isKnownToBeTrue
 
       if (debugMode && filteredTerms.nonEmpty) {
         addDebugExp(debugExp.get.withTerm(And(filteredTerms)))
       }
 
-      if (filteredTerms.nonEmpty) assumeWithoutSmokeChecks(InsertionOrderedSet(filteredTerms), isDefinition = true)
+      if (filteredTerms.nonEmpty) assumeWithoutSmokeChecks(InsertionOrderedSet(filteredTerms), analysisInfos, isDefinition = true)
     }
 
-    def assume(assumptions: Iterable[(Term, Option[DebugExp])]): Unit =
-      assume(InsertionOrderedSet(assumptions), false)
-
-    def assume(assumptions: InsertionOrderedSet[(Term, Option[DebugExp])], enforceAssumption: Boolean = false, isDefinition: Boolean = false): Unit = {
+    def assume(assumptions: InsertionOrderedSet[(Term, Option[DebugExp])], enforceAssumption: Boolean, isDefinition: Boolean, analysisInfos: AnalysisInfos): Unit = {
       val filteredAssumptions =
         if (enforceAssumption) assumptions
         else assumptions filterNot (a => isKnownToBeTrue(a._1))
@@ -368,26 +408,30 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
         filteredAssumptions foreach (a => addDebugExp(a._2.get.withTerm(a._1)))
       }
 
-      if (filteredAssumptions.nonEmpty) assumeWithoutSmokeChecks(filteredAssumptions map (_._1), isDefinition=isDefinition)
+      if (filteredAssumptions.nonEmpty) {
+         assumeWithoutSmokeChecks(InsertionOrderedSet(filteredAssumptions.map(_._1)), analysisInfos, isDefinition=isDefinition)
+      }
     }
 
-    def assume(assumptions: Seq[Term], debugExps: Option[Seq[DebugExp]]): Unit = {
-      assumeWithoutSmokeChecks(InsertionOrderedSet(assumptions))
+    def assume(assumptions: Seq[Term], debugExps: Option[Seq[DebugExp]], analysisInfos: AnalysisInfos): Unit = {
+      assumeWithoutSmokeChecks(InsertionOrderedSet(assumptions), analysisInfos)
       if (debugMode) {
         debugExps.get foreach (e => addDebugExp(e))
       }
     }
 
-    def assume(terms: Iterable[Term], debugExp: Option[DebugExp], enforceAssumption: Boolean): Unit = {
+    def assume(terms: Iterable[Term], debugExp: Option[DebugExp], enforceAssumption: Boolean, analysisInfos: AnalysisInfos): Unit = {
       val filteredTerms =
         if (enforceAssumption) terms
         else terms filterNot isKnownToBeTrue
 
-      if (debugMode && filteredTerms.nonEmpty) {
-        addDebugExp(debugExp.get.withTerm(And(filteredTerms)))
-      }
+      if (filteredTerms.nonEmpty) {
+        if (debugMode) {
+          addDebugExp(debugExp.get.withTerm(And(filteredTerms)))
+        }
 
-      if (filteredTerms.nonEmpty) assumeWithoutSmokeChecks(InsertionOrderedSet(filteredTerms))
+        assumeWithoutSmokeChecks(InsertionOrderedSet(filteredTerms), analysisInfos)
+      }
     }
 
     def debuggerAssume(terms: Iterable[Term], de: DebugExp) = {
@@ -400,37 +444,47 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
       })
     }
 
-    private def assumeWithoutSmokeChecks(terms: InsertionOrderedSet[Term], isDefinition: Boolean = false) = {
-      val assumeRecord = new DeciderAssumeRecord(terms)
-      val sepIdentifier = symbExLog.openScope(assumeRecord)
+    protected def assumeWithoutSmokeChecks(terms: InsertionOrderedSet[Term], analysisInfos: AnalysisInfos, isDefinition: Boolean = false): Unit =
+      assumeWithoutSmokeChecksInternal(terms, isDefinition, _ => None)(t => prover.assume(proverTerm(t)))
 
-      /* Add terms to Silicon-managed path conditions */
-      if (isDefinition) {
-        terms foreach pathConditions.addDefinition
-      } else {
-        terms foreach pathConditions.add
+    protected def assumeWithoutSmokeChecksInternal(terms: InsertionOrderedSet[Term], isDefinition: Boolean, nodeIds: Term => Option[Int])(proverAssume: Term => Unit): Unit =
+      if (!isPathMarkedInfeasible) {
+        val assumeRecord = new DeciderAssumeRecord(terms)
+        val sepIdentifier = symbExLog.openScope(assumeRecord)
+
+        /* Add terms to Silicon-managed path conditions */
+        if (isDefinition) {
+          terms foreach (t => pathConditions.addDefinition(t, nodeIds(t)))
+        } else {
+          terms foreach (t => pathConditions.add(t, nodeIds(t)))
+        }
+
+        /* Add terms to the prover's assumptions */
+        terms foreach proverAssume
+
+        symbExLog.closeScope(sepIdentifier)
       }
 
-      /* Add terms to the prover's assumptions */
-      if (SeqDistinctInverse.enabled)
-        terms foreach (t => prover.assume(SeqDistinctInverse.rewrite(t, (from, to) => fresh("seqInv", Seq(from), to))))
-      else
-        terms foreach prover.assume
-
-      symbExLog.closeScope(sepIdentifier)
-      None
-    }
+    /* The form in which an assumption is sent to the prover */
+    protected def proverTerm(t: Term): Term =
+      if (SeqDistinctInverse.enabled) SeqDistinctInverse.rewrite(t, (from, to) => fresh("seqInv", Seq(from), to))
+      else t
 
     /* Asserting facts */
 
-    def checkSmoke(isAssert: Boolean = false): Boolean = {
-      val timeout = if (isAssert) Verifier.config.assertTimeout.toOption else Verifier.config.checkTimeout.toOption
-      prover.check(timeout) == Unsat
+    def checkSmoke(analysisInfos: AnalysisInfos, isAssert: Boolean=false): Boolean = {
+      checkSmokeInternal(isAssert)
     }
 
-    def check(t: Term, timeout: Int): Boolean = check(t, Some(timeout), quickly = false)
+    protected def checkSmokeInternal(isAssert: Boolean): Boolean = {
+      val timeout = if (isAssert) Verifier.config.assertTimeout.toOption else Verifier.config.checkTimeout.toOption
+      val result = prover.check(timeout) == Unsat
+      if(result) pcs.markPathInfeasible(true)
+      result
+    }
 
-    def checkQuickly(t: Term): Boolean = check(t, None, quickly = true)
+    def checkQuickly(t: Term, analysisInfos: AnalysisInfos): Boolean =
+      check(t, None, quickly = true, analysisInfos)._1
 
     private val optionalCheckAllowance: Int = Decider.optionalCheckAllowance
     private var _failedOptionalChecks = 0
@@ -442,10 +496,10 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
 
     def restoreOptionalCheckAllowance(failedChecks: Int = 0): Unit = _failedOptionalChecks = failedChecks
 
-    def checkOptional(t: Term, timeout: Int): Boolean = {
+    def checkOptional(t: Term, timeout: Int, analysisInfos: AnalysisInfos): Boolean = {
       val full = _failedOptionalChecks < optionalCheckAllowance
       proverAsked = false
-      val holds = if (full) check(t, timeout) else checkQuickly(t)
+      val holds = if (full) check(t, timeout, analysisInfos) else checkQuickly(t, analysisInfos)
       if (!holds && proverAsked) {
         _failedOptionalChecks += 1
         val (fullFailed, quickFailed, most) = optionalCheckStats
@@ -455,27 +509,47 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
       holds
     }
 
-    private def check(t: Term, timeout: Option[Int], quickly: Boolean): Boolean = {
+    private def check(t: Term, timeout: Option[Int], quickly: Boolean, analysisInfos: AnalysisInfos): (Boolean, Option[Int]) = {
       /* If the negation of t is assumed, then t holds only if the path conditions are inconsistent. A check
-       * is allowed to fail in that case, which saves a costly query that usually ends in unknown.
+       * is allowed to fail in that case, which saves a costly query that usually ends in unknown. On a path
+       * already marked infeasible, every check holds without a query, see [[proverAssert]].
        */
       val negated = t match {
         case Not(a) => a
         case _ => Not(t)
       }
-      if (contradictionSkip && pcs.assumptions.contains(negated)) {
+      if (contradictionSkip && !isPathMarkedInfeasible && pcs.assumptions.contains(negated)) {
         skippedChecks += 1
-        false
+        (false, None)
       } else {
-        deciderAssert(t, timeout, quickly)
+        deciderAssert(t, analysisInfos, timeout, isCheck = true, quickly = quickly)
       }
     }
 
-    def assert(t: Term, timeout: Option[Int] = Verifier.config.assertTimeout.toOption)
-              (Q: Boolean => VerificationResult)
-              : VerificationResult = {
+    override def handleFailedAssertion(failedAssertion: Term, e: Option[ast.Exp], finalExp: Option[ast.Exp], analysisInfos: AnalysisInfos, assumeFailedAssertion: Boolean): Unit = {
+      if (assumeFailedAssertion) {
+        assume(failedAssertion, e, finalExp, failedAssertionInfos(analysisInfos))
+        failedAssertion match {
+          case False => checkSmoke(analysisInfos)
+          case _ =>
+        }
+      }
+    }
 
-      val success = deciderAssert(t, timeout)
+    /* The infos to use when a failed assertion is subsequently assumed. */
+    protected def failedAssertionInfos(analysisInfos: AnalysisInfos): AnalysisInfos = analysisInfos
+
+    def check(t: Term, timeout: Int, analysisInfos: AnalysisInfos): Boolean =
+      checkWithNodeId(t, timeout, analysisInfos)._1
+
+    def checkWithNodeId(t: Term, timeout: Int, analysisInfos: AnalysisInfos): (Boolean, Option[Int]) =
+      check(t, Some(timeout), quickly = false, analysisInfos)
+
+    def assert(t: Term, analysisInfos: AnalysisInfos)(Q:  Boolean => VerificationResult): VerificationResult =
+        assert(t, analysisInfos,  timeout=Verifier.config.assertTimeout.toOption)(Q)
+
+    def assert(t: Term, analysisInfos: AnalysisInfos, timeout: Option[Int])(Q:  Boolean => VerificationResult): VerificationResult = {
+      val (success, _) = deciderAssert(t, analysisInfos, timeout)
 
       // If the SMT query was not successful, store it (possibly "overwriting"
       // any previously saved query), otherwise discard any query we had saved
@@ -489,18 +563,20 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
       Q(success)
     }
 
-    private def deciderAssert(t: Term, timeout: Option[Int], quickly: Boolean = false) = {
+    private def deciderAssert(t: Term, analysisInfos: AnalysisInfos, timeout: Option[Int], isCheck: Boolean = false, quickly: Boolean = false): (Boolean, Option[Int]) = {
       val assertRecord = new DeciderAssertRecord(t, timeout)
       val sepIdentifier = symbExLog.openScope(assertRecord)
 
-      val asserted = isKnownToBeTrue(t)
-      val result = asserted || proverAssert(t, timeout, quickly)
+      val result = if (isKnownToBeTrue(t)) (true, None) else deciderAssertInternal(t, timeout, analysisInfos, isCheck, quickly)
 
       symbExLog.closeScope(sepIdentifier)
       result
     }
 
-    private def isKnownToBeTrue(t: Term) = t match {
+    protected def deciderAssertInternal(t: Term, timeout: Option[Int], analysisInfos: AnalysisInfos, isCheck: Boolean, quickly: Boolean): (Boolean, Option[Int]) =
+      (proverAssert(t, timeout)(if (quickly) prover.assertQuickly(t) else prover.assert(t, timeout)), None)
+
+    protected def isKnownToBeTrue(t: Term) = t match {
       case True => true
   //    case eq: BuiltinEquals => eq.p0 == eq.p1 /* WARNING: Blocking trivial equalities might hinder axiom triggering. */
       case _ if pcs.assumptions contains t => true
@@ -508,12 +584,11 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
       case _ => false
     }
 
-    private def proverAssert(t: Term, timeout: Option[Int], quickly: Boolean = false) = {
+    protected def proverAssert(t: Term, timeout: Option[Int])(invokeProver: => Boolean): Boolean = {
       val assertRecord = new ProverAssertRecord(t, timeout)
       val sepIdentifier = symbExLog.openScope(assertRecord)
 
-      proverAsked = true
-      val result = if (quickly) prover.assertQuickly(t) else prover.assert(t, timeout)
+      val result = isPathMarkedInfeasible || { proverAsked = true; invokeProver }
 
       symbExLog.whenEnabled {
         assertRecord.statistics = Some(symbExLog.deltaStatistics(prover.statistics()))
@@ -646,7 +721,10 @@ trait DefaultDeciderProvider extends VerifierComponent { this: Verifier =>
 
     def statistics(): Map[String, String] = prover.statistics()
 
-    override def generateModel(): Unit = proverAssert(False, Verifier.config.assertTimeout.toOption)
+    override def generateModel(): Unit = {
+      val timeout = Verifier.config.assertTimeout.toOption
+      proverAssert(False, timeout)(prover.assert(False, timeout))
+    }
 
     override def getModel(): Model = prover.getModel()
 
