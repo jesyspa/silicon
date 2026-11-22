@@ -1,0 +1,4 @@
+harness/target/
+harness/project/target/
+harness/project/project/
+__pycache__/
