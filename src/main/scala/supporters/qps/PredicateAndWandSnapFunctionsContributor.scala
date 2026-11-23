@@ -11,14 +11,12 @@
 package  viper.silicon.supporters.qps
 
 import viper.silver.ast
-import viper.silver.ast.utility.QuantifiedPermissions.QuantifiedPermissionAssertion
 import viper.silicon.common.collections.immutable.InsertionOrderedSet
 import viper.silicon.{Config, Map}
 import viper.silicon.interfaces.{PreambleContributor, PreambleReader}
 import viper.silicon.interfaces.decider.{ProverLike, TermConverter}
 import viper.silicon.state.terms.{Sort, SortDecl, sorts}
 import viper.silicon.state.chunks.MagicWandIdentifier
-import viper.silver.ast.PredicateAccess
 
 trait PredicateSnapFunctionsContributor[SO, SY, AX] extends PreambleContributor[SO, SY, AX]
 
@@ -71,28 +69,11 @@ class DefaultPredicateAndWandSnapFunctionsContributor(preambleReader: PreambleRe
 
   /* Functionality */
 
-  def analyze(program: ast.Program): Unit = {
-    // TODO: Use next snippet instead?
-    //   collectedPredicates =
-    //     ast.utility.QuantifiedPermissions.quantifiedPredicates(program, program).toSet
-    program visit {
-      case QuantifiedPermissionAssertion(_, _, acc: ast.PredicateAccessPredicate) =>
-        val predicate = program.findPredicate(acc.loc.predicateName)
-        collectedPredicates += predicate
-      case ast.Forall(_, triggers, _) =>
-        val trigExps = triggers flatMap (_.exps)
-        val predicateAccesses = trigExps flatMap (e => e.deepCollect {case pa: PredicateAccess => pa})
-        collectedPredicates ++= (predicateAccesses map (_.loc(program)))
-      case ast.Exists(_, triggers, _) =>
-        val trigExps = triggers flatMap (_.exps)
-        val predicateAccesses = trigExps flatMap (e => e.deepCollect { case pa: PredicateAccess => pa })
-        collectedPredicates ++= (predicateAccesses map (_.loc(program)))
-    }
+  def analyze(program: ast.Program): Unit = analyze(program, QuantifiedResources.preamble(program))
 
-    collectedWandIdentifiers =
-      ast.utility.QuantifiedPermissions.quantifiedMagicWands(program, program)
-        .map(MagicWandIdentifier(_, program))
-        .toSet
+  private[silicon] def analyze(program: ast.Program, resources: QuantifiedResources.ForPreamble): Unit = {
+    collectedPredicates ++= resources.predicates
+    collectedWandIdentifiers = resources.wands.map(MagicWandIdentifier(_, program))
 
     // WARNING: DefaultSetsContributor contributes a sort that is due to QPs over predicates and wands
 

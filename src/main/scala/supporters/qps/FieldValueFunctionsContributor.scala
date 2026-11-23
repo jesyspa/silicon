@@ -7,14 +7,12 @@
 package viper.silicon.supporters.qps
 
 import viper.silver.ast
-import viper.silver.ast.utility.QuantifiedPermissions.QuantifiedPermissionAssertion
 import viper.silicon.common.collections.immutable.InsertionOrderedSet
 import viper.silicon.{Config, Map}
 import viper.silicon.interfaces.{PreambleContributor, PreambleReader}
 import viper.silicon.interfaces.decider.{ProverLike, TermConverter}
 import viper.silicon.state.SymbolConverter
 import viper.silicon.state.terms.{SortDecl, sorts}
-import viper.silver.ast.{Exists, FieldAccess, Forall}
 
 trait FieldValueFunctionsContributor[SO, SY, AX] extends PreambleContributor[SO, SY, AX]
 
@@ -46,20 +44,10 @@ class DefaultFieldValueFunctionsContributor(preambleReader: PreambleReader[Strin
 
   /* Functionality */
 
-  def analyze(program: ast.Program): Unit = {
-    /* TODO: Use viper.silver.ast.utility.QuantifiedPermissions.quantifiedFields instead? */
-    program visit {
-      case QuantifiedPermissionAssertion(_, _, acc: ast.FieldAccessPredicate) =>
-        collectedFields += acc.loc.field
-      case Forall(_, triggers, _) =>
-        val trigExps = triggers flatMap (_.exps)
-        val fieldAccesses = trigExps flatMap (e => e.deepCollect {case fa: FieldAccess => fa})
-        collectedFields ++= (fieldAccesses map (_.field))
-      case Exists(_, triggers, _) =>
-        val trigExps = triggers flatMap (_.exps)
-        val fieldAccesses = trigExps flatMap (e => e.deepCollect { case fa: FieldAccess => fa })
-        collectedFields ++= (fieldAccesses map (_.field))
-    }
+  def analyze(program: ast.Program): Unit = analyze(QuantifiedResources.preamble(program))
+
+  private[silicon] def analyze(resources: QuantifiedResources.ForPreamble): Unit = {
+    collectedFields ++= resources.fields
 
     // WARNING: DefaultSetsContributor contributes a sort that is due to QPs over fields
 

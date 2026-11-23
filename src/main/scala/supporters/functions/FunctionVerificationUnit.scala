@@ -22,6 +22,7 @@ import viper.silicon.state.State.OldHeaps
 import viper.silicon.state.terms._
 import viper.silicon.state.terms.predef.`?s`
 import viper.silicon.common.collections.immutable.InsertionOrderedSet
+import viper.silicon.supporters.qps.QuantifiedResources
 import viper.silicon.decider.Decider
 import viper.silicon.dependencyAnalysis._
 import viper.silicon.rules.{consumer, evaluator, executionFlowController, producer}
@@ -96,7 +97,9 @@ trait DefaultFunctionVerificationUnitProvider extends VerifierComponent { v: Ver
       x
     }
 
-    def analyze(program: ast.Program): Unit = {
+    def analyze(program: ast.Program): Unit = analyze(program, new QuantifiedResources(program))
+
+    private[silicon] def analyze(program: ast.Program, resources: QuantifiedResources): Unit = {
       this.program = program
 
       val functionOrderInProgram = program.functions.zipWithIndex.map(fi => (fi._1.name, fi._2)).toMap
@@ -108,7 +111,7 @@ trait DefaultFunctionVerificationUnitProvider extends VerifierComponent { v: Ver
       functionData = toMap(
         heights.map { case (funcName, height) =>
           val func = program.findFunction(funcName)
-          val quantifiedFields = InsertionOrderedSet(ast.utility.QuantifiedPermissions.quantifiedFields(func, program))
+          val quantifiedFields = resources.forMember(func).fields
           val data = new FunctionData(func, height, quantifiedFields, program)(symbolConverter, expressionTranslator,
                                       identifierFactory, pred => predicateData(pred.name), functionEncoding,
                                       Verifier.config, reporter)

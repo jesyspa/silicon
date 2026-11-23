@@ -218,6 +218,7 @@ class DefaultMainVerifier(config: Config,
       println(program)
     }
 
+    val quantifiedResources = new QuantifiedResources(program)
     predSnapGenerator.setup(program) // TODO: Why did Nadja put this here?
 
     _verificationPoolManager.ensureStarted(program.methods.count(!excludeMethod(_)) + cfgs.length)
@@ -236,7 +237,7 @@ class DefaultMainVerifier(config: Config,
     }
 
     val (functionData, predicateData) = _verificationPoolManager.withBroadcastBatch {
-      analyzeProgramAndEmitPreambleContributions(program, allProvers) // TODO: Add support for cfgs.
+      analyzeProgramAndEmitPreambleContributions(program, quantifiedResources, allProvers) // TODO: Add support for cfgs.
     }
 
     allProvers.comment("End preamble")
@@ -252,7 +253,7 @@ class DefaultMainVerifier(config: Config,
       var results: Seq[VerificationResult] = null
       try {
         results = verifyMember(this, function)((v1, f) =>
-          v1.functionsSupporter.verify(createInitialState(f, program, functionData, predicateData), f)
+          v1.functionsSupporter.verify(createInitialState(f, program, functionData, predicateData, quantifiedResources.forMember(f)), f)
             .flatMap(extractAllVerificationResults))
       } catch {
         case e : Throwable =>
@@ -270,7 +271,7 @@ class DefaultMainVerifier(config: Config,
       var results: Seq[VerificationResult] = null
       try {
         results = verifyMember(this, predicate)((v1, p) =>
-          v1.predicateSupporter.verify(createInitialState(p, program, functionData, predicateData), p)
+          v1.predicateSupporter.verify(createInitialState(p, program, functionData, predicateData, quantifiedResources.forMember(p)), p)
             .flatMap(extractAllVerificationResults))
       } catch {
         case e: Throwable =>
@@ -303,7 +304,7 @@ class DefaultMainVerifier(config: Config,
 
     val verificationTaskFutures: Seq[Future[Seq[VerificationResult]]] =
       program.methods.filterNot(excludeMethod).map(method => {
-        val s = createInitialState(method, program, functionData, predicateData).copy(parallelizeBranches =
+        val s = createInitialState(method, program, functionData, predicateData, quantifiedResources.forMember(method)).copy(parallelizeBranches =
           Verifier.config.parallelizeBranches()) /* [BRANCH-PARALLELISATION] */
 
         _verificationPoolManager.queueVerificationTask(v => {
@@ -374,14 +375,13 @@ class DefaultMainVerifier(config: Config,
 
   def afterVerification(verificationResults: List[VerificationResult], program: ast.Program, inputFile: Option[String]): Unit = {}
 
-    private def createInitialState(member: ast.Member,
+  private def createInitialState(member: ast.Member,
                                  program: ast.Program,
                                  functionData: Map[String, FunctionData],
-                                 predicateData: Map[String, PredicateData]): State = {
-    val quantifiedFields = InsertionOrderedSet(ast.utility.QuantifiedPermissions.quantifiedFields(member, program))
-    val quantifiedPredicates = InsertionOrderedSet(ast.utility.QuantifiedPermissions.quantifiedPredicates(member, program))
-    val quantifiedMagicWands = InsertionOrderedSet(ast.utility.QuantifiedPermissions.quantifiedMagicWands(member, program)).map(MagicWandIdentifier(_, program))
-    val resourceTriggers: InsertionOrderedSet[Any] = InsertionOrderedSet(ast.utility.QuantifiedPermissions.resourceTriggers(member, program)).map{
+                                 predicateData: Map[String, PredicateData],
+                                 resources: QuantifiedResources.ForMember): State = {
+    val quantifiedMagicWands = InsertionOrderedSet(resources.wands).map(MagicWandIdentifier(_, program))
+    val resourceTriggers: InsertionOrderedSet[Any] = resources.triggers.map {
       case wand: ast.MagicWand => MagicWandIdentifier(wand, program)
       case r => r
     }
@@ -441,8 +441,8 @@ class DefaultMainVerifier(config: Config,
           currentBlock = None,
           functionData = functionData,
           predicateData = predicateData,
-          qpFields = quantifiedFields,
-          qpPredicates = quantifiedPredicates,
+          qpFields = resources.fields,
+          qpPredicates = resources.predicates,
           qpMagicWands = quantifiedMagicWands,
           permLocations = permResources,
           predicateSnapMap = predSnapGenerator.snapMap,
@@ -588,10 +588,16 @@ class DefaultMainVerifier(config: Config,
     predicateSupporter
   )
 
-  private def analyzeProgramAndEmitPreambleContributions(program: ast.Program, sink: ProverLike) = {
-    analysisOrder foreach (component => {
-      component.analyze(program)
-    })
+  private def analyzeProgramAndEmitPreambleContributions(program: ast.Program,
+                                                          resources: QuantifiedResources,
+                                                          sink: ProverLike) = {
+    analysisOrder foreach {
+      case `fieldValueFunctionsContributor` => fieldValueFunctionsContributor.analyze(resources.preamble)
+      case `predicateAndWandSnapFunctionsContributor` =>
+        predicateAndWandSnapFunctionsContributor.analyze(program, resources.preamble)
+      case component if component eq functionsSupporter => functionsSupporter.analyze(program, resources)
+      case component => component.analyze(program)
+    }
     val predicateData = predicateSupporter.predicateData
     val functionData = functionsSupporter.functionData
     functionsSupporter.predicateData = predicateData
