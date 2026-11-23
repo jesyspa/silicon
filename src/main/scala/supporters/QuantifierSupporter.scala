@@ -81,6 +81,10 @@ class DefaultQuantifierSupporter(triggerGenerator: TriggerGenerator) extends Qua
       case _ => t
     }
 
+    if (BooleanSimplification.isTrivialTautology(q.body)) {
+      return Seq.empty
+    }
+
     // TODO: Keep all heap-independent triggers under one quantifier instead of splitting
     q.triggers
       // : Seq[Trigger]

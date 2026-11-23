@@ -1006,6 +1006,56 @@ class Or private[terms] (val ts: Seq[Term]) extends BooleanTerm
   override lazy val toString = ts.mkString(" || ")
 }
 
+object BooleanSimplification {
+  @inline
+  private def isComplementary(t0: Term, t1: Term): Boolean = (t0, t1) match {
+    case (Not(a), b) => a == b
+    case (a, Not(b)) => a == b
+    case _ => false
+  }
+
+  private def hasComplementaryPair(ts: Seq[Term]): Boolean = {
+    var hasNeg = false
+    val it = ts.iterator
+    while (it.hasNext && !hasNeg) {
+      if (it.next().isInstanceOf[Not]) hasNeg = true
+    }
+    if (!hasNeg) false
+    else ts.exists {
+      case Not(a) => ts.contains(a)
+      case _ => false
+    }
+  }
+
+  @inline
+  private def lhsAbsorbs(lhs: Term, rhsAtom: Term): Boolean =
+    lhs == rhsAtom || (lhs match {
+      case And(cs) => cs.contains(rhsAtom)
+      case _ => false
+    })
+
+  /** Recognises pure propositional tautologies produced when joining feasible branches
+    * (`c || !c` and `c ==> c`) so empty auxiliary quantifiers are not emitted to the prover.
+    */
+  def isTrivialTautology(t: Term): Boolean = t match {
+    case True => true
+    case Or(ts) =>
+      (ts.length == 2 && isComplementary(ts(0), ts(1))) ||
+      hasComplementaryPair(ts) ||
+      ts.exists(isTrivialTautology)
+    case And(ts) =>
+      ts.forall(isTrivialTautology)
+    case Implies(lhs, rhs) =>
+      lhs == False || isTrivialTautology(rhs) || lhsAbsorbs(lhs, rhs) || (rhs match {
+        case And(cs) => cs.forall(c => lhsAbsorbs(lhs, c) || isTrivialTautology(c))
+        case _ => false
+      })
+    case Quantification(Forall, _, body, _, _, _, _) =>
+      isTrivialTautology(body)
+    case _ => false
+  }
+}
+
 /* TODO: Or should be (Term, Term) => BooleanTerm, but that would require
  *       a Boolean(t: Term) wrapper, because e0/e1 may just be a Var.
  *       It would be sooooo handy to be able to work with Term[Sort], but
