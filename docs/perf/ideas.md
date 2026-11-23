@@ -1,6 +1,6 @@
-# Silicon performance ideas ledger (2026-10-14 to 2026-10-27)
+# Silicon performance ideas ledger
 
-Purpose: one place listing every Silicon performance idea tried or proposed in this window, with its result, so work is not repeated.
+Purpose: record Silicon performance ideas and their results so work is not repeated.
 Built from wisp transcripts, workflow-run artifacts, `~/data/viper-corpus-results/` reports and git. Most transcripts were read through final reports and targeted greps, not every step. Numbers are quoted from those sources; "derived" marks arithmetic done while writing this file.
 
 ## Answer to "what was rebuilt repeatedly instead of cached"
@@ -760,6 +760,36 @@ Evidence and reproduction: `~/data/viper-corpus-results/dagrea-20261029/` contai
   - `allAssumptions --= layer.assumptions` when layers are popped (`InsertionOrderedSet.excl`, 0.6-2.0%) and `isKnownToBeTrue` lookups (1.0-1.7%) are the cost of keeping one set of all assumptions.
   - `State.copy` remains at about 2% after the change above, spread over many callers; `State.<init>` reads `Verifier.config.enableDebugging()` for a default argument on every copy (0.8%).
   - Prover I/O (`readLineFromInput`, `writeLine`, `sendPop`): 6-8%, one round trip per command because of `print-success`.
+
+## 21. Verifier allocations, program analysis and SMT cleanup, 2026-11-22 to 11-23
+
+**Not ready for main.** Commit `4a3f6826` on `perf/verifier-and-smt-speedups` keeps the verifier allocation changes (cheaper assumption set updates, stack bookkeeping, buffer reuse and state fast paths), replaces repeated AST walks with `ProgramAnalysis`, skips unused prover work, and drops or combines redundant auxiliary quantifiers. The commit is based on `d26d4c0a`, before the upstream merge at `df0018f0`. A trial merge found conflicts in `PathConditions`, `ChunkSupporter`, `PredicateAndWandSnapFunctionsContributor` and `DefaultMainVerifier`. The full suite passed 1,594 tests across 41 suites on `cand7`; the final commit's build passed focused tests. Neither run tested a port to main.
+
+### What the measurements show
+
+The full paired run compared **`cand7`, not `4a3f6826`**, with `d26d4c0a`: 250 files × two seeds × two builds, warm JVM, Z3 4.16.0, 90 s timeout. `cand7` still used unordered consolidation pairs. Ratios below are candidate / baseline; less than 1 means less work or time.
+
+| Metric, matching completed files | Geometric mean ratio (95% bootstrap CI) | Files |
+|---|---:|---:|
+| Z3 resource units (`:rlimit`, not time) | 0.958 [0.927, 0.988] | 192 |
+| Total process CPU time | 1.002 [0.959, 1.046] | 224 |
+| Wall time | 1.013 [0.978, 1.049] | 224 |
+
+Z3 did 4.2% less work on this measure (2.8% less on the 182 stable files), but there was no clear overall speedup. Some files improved substantially: `ERC20_alloc` CPU went from 6.62 to 3.24 s, and the reachability `0_append` verified on both seeds after timing out on both in the baseline. Those gains did not generalize: four file/seed runs newly timed out, while three stopped timing out.
+
+The final defaults were tested on a smaller diagnostic slice, but the run was cut short (142 of 152 planned arm runs). Among 34 matching completed files, CPU was 15.5% higher and wall time 13.2% higher by geometric mean. One input traded a pass for a timeout on one seed and a timeout for a pass on the other. Treat this as a regression signal, not a corpus estimate. Spot checks separately found that grouping auxiliary triggers still made VerCors `selection` take 14.4 s instead of 4.5 s on seed 1, despite cutting `PokerHand_true` solver work by about 37%. Next comparison: port the verifier-only changes first, then measure the auxiliary-quantifier changes separately (including trigger grouping on/off), against the same current-main baseline with paired seeds and outcome checks.
+
+### Experiments excluded from the source commit
+
+The aggressive solver changes, taken together, cut `PokerHand_true` solver work from 34.4M to 16.6M units and its SMT log from 99.4 to 63.8 MB. Do not attribute those combined gains to any one change. The broader changes were rejected because they changed the order or shape of work Z3 saw and introduced slowdowns or timeouts:
+
+| Experiment | What changed | Why rejected |
+|---|---|---|
+| Global Boolean simplification | Flatten nested disjunctions, drop `c \\|\\| !c`, and strip a repeated antecedent from `c ==> (c && b)` outside auxiliary quantifiers. | Flattening made Nagini `080-is_happy` time out across seeds. Dropping top-level tautological assertions raised `RSLLockNoSpin` solver work about 11× and regressed `0_ring-insert-sorted`. |
+| Deduplicate statement branch checks | Evaluate the `if` condition once and avoid duplicate feasibility probes for the two outgoing edges. | Skipping the empty-else probes made `118-get_closest_vowel` time out. An earlier fusion also caused exponential exploration of dead paths in `secc-cddc`. |
+| Unordered consolidation pairs | Check each pair of chunks once instead of checking both orders for symmetric properties. | `list-buggy` went from about 8 s to timeout on both seeds in `cand7`. VerCors permutation examples took about 2–2.6× as much CPU even though Z3 recorded about half the resource units. |
+
+These edits were reverted before `4a3f6826`; that branch does not contain the rejected implementations, even behind flags. The local session transcript for `carey-1795374502` records the experimental edits (start with `wisp-info show carey --grep 'unorderedConsolidationPairs|dedupEdgeChecks|simplifyFormulas'`), the broad-run output (step 175), and the partial final diagnostic (steps 183–184). No corpus inputs are part of this record.
 
 ## 12. Source index
 
