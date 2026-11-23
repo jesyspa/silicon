@@ -384,9 +384,21 @@ abstract class ProverStdIO(uniqueId: String,
     writeLine(cmd)
     readSuccess()
     /* Declarations are global (see the prover config), hence only assertions are popped */
-    val popped = scopedCommands.takeRight(n).flatten.filterNot(_.startsWith("(assert"))
-    scopedCommands = scopedCommands.dropRight(n)
-    scopedCommands.last ++= popped
+    val keptDepth = scopedCommands.length - n
+    val parent = scopedCommands(keptDepth - 1)
+    // Keep global commands in replay order without collecting the discarded assertions.
+    var depth = keptDepth
+    while (depth < scopedCommands.length) {
+      val commands = scopedCommands(depth)
+      var i = 0
+      while (i < commands.length) {
+        val command = commands(i)
+        if (!command.startsWith("(assert")) parent += command
+        i += 1
+      }
+      depth += 1
+    }
+    scopedCommands = scopedCommands.take(keptDepth)
     if (suspendedFromDepth.exists(_ > scopedCommands.length - 1)) {
       comment(s"Resuming prover $uniqueId")
       restartAndReplay()
