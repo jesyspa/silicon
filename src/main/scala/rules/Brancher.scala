@@ -26,7 +26,8 @@ trait BranchingRules extends SymbolicExecutionRules {
              conditionExp: (ast.Exp, Option[ast.Exp]),
              v: Verifier,
              fromShortCircuitingAnd: Boolean = false,
-             joined: Boolean = false)
+             joined: Boolean = false,
+             hasElseBranch: Boolean = true)
             (fTrue: (State, Verifier) => VerificationResult,
              fFalse: (State, Verifier) => VerificationResult)
             : VerificationResult
@@ -38,7 +39,8 @@ object brancher extends BranchingRules {
              conditionExp: (ast.Exp, Option[ast.Exp]),
              v: Verifier,
              fromShortCircuitingAnd: Boolean = false,
-             joined: Boolean = false)
+             joined: Boolean = false,
+             hasElseBranch: Boolean = true)
             (fThen: (State, Verifier) => VerificationResult,
              fElse: (State, Verifier) => VerificationResult)
             : VerificationResult = {
@@ -76,7 +78,7 @@ object brancher extends BranchingRules {
       || !infeasible(negatedCondition))
 
     /* False if the then-branch is to be explored */
-    val executeElseBranch = (
+    val executeElseBranch = hasElseBranch && (
          !executeThenBranch /* Assumes that ast least one branch is feasible */
       || skipPathFeasibilityCheck
       || !infeasible(condition))

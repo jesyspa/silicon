@@ -18,6 +18,7 @@ import viper.silver.verifier.reasons._
 import viper.silver.{ast, cfg}
 import viper.silicon.decider.RecordedPathConditions
 import viper.silicon.interfaces._
+import viper.silicon.logger.NoopMemberSymbExLog
 import viper.silicon.logger.records.data.{CommentRecord, ConditionalEdgeRecord, ExecuteRecord, MethodCallRecord}
 import viper.silicon.state._
 import viper.silicon.state.terms._
@@ -48,11 +49,20 @@ object executor extends ExecutionRules {
   import consumer._
   import evaluator._
   import producer._
+  private val dedupEdgeChecks: Boolean = !"false".equals(System.getProperty("silicon.exp.dedupEdgeChecks"))
   private val pathIdGenerator = new AtomicInteger(0)
   private val pathComplete = collection.mutable.HashSet[Int]();
 
   def nextPathId(): Int = {
     pathIdGenerator.incrementAndGet()
+  }
+
+  private def followTarget(s: State, edge: SilverEdge, v: Verifier, joinPoint: Option[SilverBlock], pathId: Int)
+                          (Q: (State, Verifier) => VerificationResult)
+                          : VerificationResult = {
+    val s1 = handleOutEdge(s, edge, v)
+    if (joinPoint.contains(edge.target)) Q(s1, v)
+    else exec(s1, edge.target, edge.kind, v, joinPoint, pathId)(Q)
   }
 
   private def follow(s: State, edge: SilverEdge, v: Verifier, joinPoint: Option[SilverBlock], pathId: Int)
@@ -75,7 +85,13 @@ object executor extends ExecutionRules {
             /* Using branch(...) here ensures that the edge condition is recorded
              * as a branch condition on the pathcondition stack.
              */
-            brancher.branch(s2.copy(parallelizeBranches = false), tCond, (ce.condition, condNew), v1)(
+            brancher.branch(
+              s2.copy(parallelizeBranches = false),
+              tCond,
+              (ce.condition, condNew),
+              v1,
+              hasElseBranch = !(dedupEdgeChecks && (v1.symbExLog eq NoopMemberSymbExLog))
+            )(
               (s3, v3) =>
                 exec(s3.copy(parallelizeBranches = s2.parallelizeBranches), ce.target, ce.kind, v3, joinPoint, pathId)((s4, v4) => {
                   v4.symbExLog.closeScope(sepIdentifier)
@@ -189,6 +205,16 @@ object executor extends ExecutionRules {
               follow(s3, elseEdge, v3, joinPoint, nextPathId())(Q)
             }))
         res
+
+      case (Seq(thenEdge@ConditionalEdge(cond1, _, _, _), elseEdge@ConditionalEdge(cond2, _, _, _)), _)
+        if dedupEdgeChecks && (v.symbExLog eq NoopMemberSymbExLog) &&
+           thenEdge.kind != cfg.Kind.Out && elseEdge.kind != cfg.Kind.Out &&
+           cond2 == ast.Not(cond1)() =>
+        eval(s, thenEdge.condition, IfFailed(thenEdge.condition), v)((s2, tCond, eCondNew, v1) =>
+          brancher.branch(s2.copy(parallelizeBranches = false), tCond, (thenEdge.condition, eCondNew), v1)(
+            (s3, v3) => followTarget(s3.copy(parallelizeBranches = s2.parallelizeBranches), thenEdge, v3, joinPoint, pathId)(Q),
+            (s3, v3) => followTarget(s3.copy(parallelizeBranches = s2.parallelizeBranches), elseEdge, v3, joinPoint, nextPathId())(Q)
+          ))
 
       case _ =>
         val uidBranchPoint = v.symbExLog.insertBranchPoint(edges.length)

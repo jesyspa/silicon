@@ -1011,6 +1011,37 @@ class Or private[terms] (val ts: Seq[Term]) extends BooleanTerm
  *       that conflicts with using extractor objects to simplify terms,
  *       since extractor objects can't be type-parametrised.
  */
+object BooleanSimplification {
+  val enabled: Boolean = !"false".equals(System.getProperty("silicon.exp.simplifyFormulas"))
+
+  @inline
+  def isComplementary(t0: Term, t1: Term): Boolean = (t0, t1) match {
+    case (Not(a), b) => a == b
+    case (a, Not(b)) => a == b
+    case _ => false
+  }
+
+  def hasComplementaryPair(ts: Seq[Term]): Boolean = {
+    var hasNeg = false
+    val it = ts.iterator
+    while (it.hasNext && !hasNeg) {
+      if (it.next().isInstanceOf[Not]) hasNeg = true
+    }
+    if (!hasNeg) false
+    else ts.exists {
+      case Not(a) => ts.contains(a)
+      case _ => false
+    }
+  }
+
+  @inline
+  def lhsAbsorbs(lhs: Term, rhsAtom: Term): Boolean =
+    lhs == rhsAtom || (lhs match {
+      case And(cs) => cs.contains(rhsAtom)
+      case _ => false
+    })
+}
+
 object Or extends GeneralCondFlyweightFactory[Iterable[Term], Seq[Term], Term, Or] {
   def apply(ts: Term*) = createOr(ts)
   def apply(ts: Iterable[Term]) = createOr(ts.toSeq)
@@ -1027,15 +1058,31 @@ object Or extends GeneralCondFlyweightFactory[Iterable[Term], Seq[Term], Term, O
 
   @inline
   def createOr(_ts: Seq[Term]): Term = {
+    if (!BooleanSimplification.enabled) {
+      var ts = _ts.flatMap { case Or(ts1) => ts1; case other => other :: Nil}
+      ts = _ts.filterNot(_ == False)
+      ts = ts.distinct
+      return ts match {
+        case Seq() => False
+        case Seq(t) => t
+        case _ if ts.contains(True) => True
+        case _ => createIfNonExistent(ts)
+      }
+    }
+
     var ts = _ts.flatMap { case Or(ts1) => ts1; case other => other :: Nil}
-    ts = _ts.filterNot(_ == False)
+    ts = ts.filterNot(_ == False)
     ts = ts.distinct
 
     ts match {
       case Seq() => False
       case Seq(t) => t
-      case _ if ts.contains(True) => True
-      case _ => createIfNonExistent(ts)
+      case Seq(t0, t1) =>
+        if (t0 == True || t1 == True || BooleanSimplification.isComplementary(t0, t1)) True
+        else createIfNonExistent(ts)
+      case _ =>
+        if (ts.contains(True) || BooleanSimplification.hasComplementaryPair(ts)) True
+        else createIfNonExistent(ts)
     }
   }
 
@@ -1065,7 +1112,11 @@ object And extends GeneralCondFlyweightFactory[Iterable[Term], Seq[Term], Term, 
     ts match {
       case Seq() => True
       case Seq(t) => t
-      case _ if ts.contains(False) => False
+      case Seq(t0, t1) if BooleanSimplification.enabled =>
+        if (t0 == False || t1 == False || BooleanSimplification.isComplementary(t0, t1)) False
+        else createIfNonExistent(ts)
+      case _ if ts.contains(False) || (BooleanSimplification.enabled && BooleanSimplification.hasComplementaryPair(ts)) =>
+        False
       case _ => createIfNonExistent(ts)
     }
   }
@@ -1087,6 +1138,10 @@ object Implies extends CondFlyweightTermFactory[(Term, Term), Implies] {
     case (_, True) => True
     case (e0, Implies(e10, e11)) => Implies(And(e0, e10), e11)
     case (e0, e1) if e0 == e1 => True
+    case (e0, e1) if BooleanSimplification.enabled && BooleanSimplification.lhsAbsorbs(e0, e1) => True
+    case (e0, And(rhs)) if BooleanSimplification.enabled && rhs.exists(BooleanSimplification.lhsAbsorbs(e0, _)) =>
+      val kept = rhs.filterNot(BooleanSimplification.lhsAbsorbs(e0, _))
+      if (kept.isEmpty) True else Implies(e0, And(kept))
     case (e0, e1) => createIfNonExistent(e0, e1)
   }
 

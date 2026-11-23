@@ -14,6 +14,10 @@ import viper.silicon.utils.ast.{BigAnd, replaceVarsInExp}
 import viper.silicon.verifier.Verifier
 import viper.silver.ast
 
+object NonQuantifiedPropertyInterpreter {
+  val unorderedPairs: Boolean = !"false".equals(System.getProperty("silicon.exp.unorderedConsolidationPairs"))
+}
+
 class NonQuantifiedPropertyInterpreter(heap: Iterable[Chunk], verifier: Verifier) extends PropertyInterpreter {
 
   protected case class Info(pm: Map[ChunkPlaceholder, GeneralChunk], resourceID: ResourceID) {
@@ -119,11 +123,25 @@ class NonQuantifiedPropertyInterpreter(heap: Iterable[Chunk], verifier: Verifier
                                     thenDo: PropertyExpression[K],
                                     otherwise: PropertyExpression[K],
                                     info: Info): (Term, Option[ast.Exp]) = {
-    val conditionTerm = buildPathCondition(condition, info)._1
-    if (verifier.decider.check(conditionTerm, Verifier.config.checkTimeout())) {
-      buildPathCondition(thenDo, info)
+    if (NonQuantifiedPropertyInterpreter.unorderedPairs && otherwise == True()) {
+      val thenRes = buildPathCondition(thenDo, info)
+      val t = thenRes._1
+      if (t == terms.True || verifier.decider.pcs.assumptions.contains(t)) {
+        return buildPathCondition(otherwise, info)
+      }
+      val conditionTerm = buildPathCondition(condition, info)._1
+      if (verifier.decider.check(conditionTerm, Verifier.config.checkTimeout())) {
+        thenRes
+      } else {
+        buildPathCondition(otherwise, info)
+      }
     } else {
-      buildPathCondition(otherwise, info)
+      val conditionTerm = buildPathCondition(condition, info)._1
+      if (verifier.decider.check(conditionTerm, Verifier.config.checkTimeout())) {
+        buildPathCondition(thenDo, info)
+      } else {
+        buildPathCondition(otherwise, info)
+      }
     }
   }
 
@@ -147,6 +165,31 @@ class NonQuantifiedPropertyInterpreter(heap: Iterable[Chunk], verifier: Verifier
                            body: PropertyExpression[kinds.Boolean],
                            info: Info)
                             : (Term, Option[ast.Exp]) = {
+    if (NonQuantifiedPropertyInterpreter.unorderedPairs && info.pm.isEmpty && chunkVariables.length == 2) {
+      val v1 = chunkVariables.head
+      val v2 = chunkVariables(1)
+      val arr = chunks.toArray
+      if (arr.length < 2) {
+        return (terms.True, Option.when(withExp)(ast.TrueLit()()))
+      }
+      val condTerms = scala.collection.mutable.ArrayBuffer.empty[Term]
+      val condExps = if (withExp) scala.collection.mutable.ArrayBuffer.empty[ast.Exp] else null
+      var i = 0
+      while (i < arr.length - 1) {
+        val info1 = info.addMapping(v1, arr(i))
+        var j = i + 1
+        while (j < arr.length) {
+          if (!(arr(i) eq arr(j))) {
+            val res = buildPathCondition(body, info1.addMapping(v2, arr(j)))
+            if (res._1 != terms.True) condTerms += res._1
+            if (withExp) condExps += res._2.get
+          }
+          j += 1
+        }
+        i += 1
+      }
+      return (terms.And(condTerms), Option.when(withExp)(BigAnd(condExps)))
+    }
     val builder: GeneralChunk => (Term, Option[ast.Exp]) = chunkVariables match {
       case c +: Seq() => chunk => buildPathCondition(body, info.addMapping(c, chunk))
       case c +: tail => chunk => buildForEach(chunks, tail, body, info.addMapping(c, chunk))
