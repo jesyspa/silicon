@@ -791,6 +791,18 @@ The aggressive solver changes, taken together, cut `PokerHand_true` solver work 
 
 These edits were reverted before `4a3f6826`; that branch does not contain the rejected implementations, even behind flags. The local session transcript for `carey-1795374502` records the experimental edits (start with `wisp-info show carey --grep 'unorderedConsolidationPairs|dedupEdgeChecks|simplifyFormulas'`), the broad-run output (step 175), and the partial final diagnostic (steps 183–184). No corpus inputs are part of this record.
 
+## 22. Isolating verifier bookkeeping from solver search, 2026-11-23
+
+The follow-up used `2f646230` (current main at the time), Corretto 21, Z3 4.16.0, and the same stratified 38-file slice. Warm timing runs used two paired seeds and a 30 s timeout. Each row compares against that same baseline; no candidates were stacked except as noted.
+
+| Change | Effect and decision |
+|---|---|
+| Keep global replay commands directly on prover pop (`91353aab`) | Skips materializing a flattened copy of the popped scopes, most of whose assertions are then discarded. On `PokerHand_true`, two matched fresh JVM runs with garbage collection disabled allocated **147–200 MiB less** (2.6–3.5%), with the same Z3 resource counts. The warm slice did not establish a timing gain: wall ratio 1.023 [0.996, 1.064], total CPU 1.024 [0.999, 1.055]. One run crossed the 30 s cutoff; with a 90 s limit both builds returned the same expected failure on that input, with identical SMT commands and resource counts. `PokerHand_true` also had identical command streams. Kept this as a targeted allocation improvement, not a corpus speedup. A test covers replay order and assertion removal after popping multiple scopes. |
+| Bulk ordered set updates (`e75b1150`, `perf/ordered-set-delta`) | Avoids intermediate set wrappers, but Scala 2.13 already implements these operations incrementally: bytecode confirms `concat` starts from the existing immutable set and `removedAll` folds `excl` over the removals. It was not rebuilding the whole set. JVM CPU was 10.7% lower in the first paired run and 2.5% lower after swapping arms (second interval includes no change); outcomes matched in both runs. Heap allocation measurements did not consistently improve across three heavy inputs. Not landed on this evidence. |
+| Replay change plus lazy heap filtering (`42af602c`, `perf/prover-replay-bookkeeping`) | Builds the filtered heap only for properties that inspect multiple chunks. The combined arm was neutral on wall time (1.014 [0.989, 1.044]) with no outcome changes. On one heavy input it allocated less, but the replay-only arm reproduced that gain. No isolated gain shown for lazy filtering; not landed. |
+
+The useful split is to compare JVM-only changes with matched SMT command streams, then test solver-facing changes separately with enough seeds to catch changes in search. Shorter SMT and fewer resource units are useful diagnostics, not substitutes for elapsed time or outcomes.
+
 ## 12. Source index
 
 - Section 20: data, scripts, replay logs and run index in `~/data/viper-corpus-results/lazy-optional-20261120/` (`README.md`).

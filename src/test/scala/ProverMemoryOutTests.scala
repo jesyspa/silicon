@@ -174,6 +174,27 @@ class ProverMemoryOutTests extends AnyFunSuite {
     }
   }
 
+  test("Replay after popping multiple scopes keeps global definitions in order but discards assertions") {
+    withProver { prover =>
+      prover.emit("(set-option :global-decls true)")
+      prover.emit("(declare-const x Int)")
+      prover.push()
+      prover.emit("(define-fun outer () Int (+ x 1))")
+      prover.assume("(> x 0)")
+      prover.push()
+      prover.emit("(define-fun inner () Int (+ outer 1))")
+      prover.assume("(< x 9)")
+      prover.pop(2)
+
+      prover.failOn = List("(declare-const restart Int)")
+      prover.emit("(declare-const restart Int)")
+      assert(prover.starts == 2)
+      assert(prover.assert("(= inner (+ x 2))", None))
+      assert(!prover.assert("(> x 0)", None))
+      assert(!prover.assert("(< x 9)", None))
+    }
+  }
+
   test("With lazy synchronisation commands reach the prover when it is queried, and a scope that is popped before that does not") {
     withLazyProver { prover =>
       /* Part of Silicon's preamble: a declaration outlives the scope in which it is made */
