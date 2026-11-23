@@ -31,6 +31,35 @@ final class InsertionOrderedSet[E] private (private val elements: VectorMap[E, U
     if (elements.contains(elem)) new InsertionOrderedSet(elements.removed(elem))
     else this
 
+  override def concat(that: IterableOnce[E]): InsertionOrderedSet[E] = {
+    if (that.knownSize == 0) return this
+    that match {
+      case other: InsertionOrderedSet[E @unchecked] =>
+        if (this eq other) return this
+        if (elements.isEmpty) return other
+      case _ =>
+    }
+    // Keep the existing keys and their positions; only append new keys.
+    var result = elements
+    val it = that.iterator
+    while (it.hasNext) {
+      val elem = it.next()
+      if (!result.contains(elem)) result = result.updated(elem, ())
+    }
+    if (result eq elements) this else new InsertionOrderedSet(result)
+  }
+
+  override def removedAll(that: IterableOnce[E]): InsertionOrderedSet[E] = {
+    if (elements.isEmpty || that.knownSize == 0) return this
+    var result = elements
+    val it = that.iterator
+    while (it.hasNext) {
+      val elem = it.next()
+      if (result.contains(elem)) result = result.removed(elem)
+    }
+    if (result eq elements) this else new InsertionOrderedSet(result)
+  }
+
   def iterator: Iterator[E] = elements.keysIterator
 
   override def size: Int = elements.size
