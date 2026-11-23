@@ -228,6 +228,7 @@ object State {
   val OldHeaps = Map
 
   def merge(s1: State, s2: State): State = {
+    if (s1 eq s2) return s1
     s1 match {
       /* Decompose state s1 */
       case State(g1, h1, program, member,
@@ -286,51 +287,104 @@ object State {
                      `predicateSnapMap1`, `predicateFormalVarMap1`, `retryLevel`, `useHeapTriggers`,
                      moreCompleteExhale2, moreCompleteExhaleQP2, `moreJoins`) =>
 
-            val oldHeaps3 = oldHeaps1 ++ oldHeaps2
-            val debugOldHeaps3 = mergeMaps(debugOldHeaps1, (), debugOldHeaps2, ())(
-              (record, _) => Some(record))(
-              (record1, _, record2, _) =>
-                Some(record1.copy(intermediateHeaps = record1.intermediateHeaps ++ record2.intermediateHeaps))
-            )
-            val temporaryHeapRecord3 = (temporaryHeapRecord1, temporaryHeapRecord2) match {
-              case (Some((label1, cause1, pcs1, heaps1)), Some((label2, cause2, _, heaps2))) =>
-                if (label1 == label2 && cause1 == cause2) Some(label1, cause1, pcs1, heaps1 ++ heaps2) else {
-                  // This case should not occur if heaps have been recorded correctly
-                  SiliconRunner.logger.warn(s"Attempted to merge states with different temporary heap records: $label1 and $label2")
-                  None
-                }
-              case (Some(tmp1), None) => Some(tmp1)
-              case (None, Some(tmp2)) => Some(tmp2)
-              case (None, None) => None
-            }
-            val functionRecorder3 = functionRecorder1.merge(functionRecorder2)
+            val oldHeaps3 =
+              if (oldHeaps1 eq oldHeaps2) oldHeaps1
+              else if (oldHeaps2.isEmpty) oldHeaps1
+              else if (oldHeaps1.isEmpty) oldHeaps2
+              else oldHeaps1 ++ oldHeaps2
+            val debugOldHeaps3 =
+              if (debugOldHeaps1 eq debugOldHeaps2) debugOldHeaps1
+              else if (debugOldHeaps2.isEmpty) debugOldHeaps1
+              else if (debugOldHeaps1.isEmpty) debugOldHeaps2
+              else mergeMaps(debugOldHeaps1, (), debugOldHeaps2, ())(
+                (record, _) => Some(record))(
+                (record1, _, record2, _) =>
+                  Some(record1.copy(intermediateHeaps = record1.intermediateHeaps ++ record2.intermediateHeaps))
+              )
+            val temporaryHeapRecord3 =
+              if (temporaryHeapRecord1 eq temporaryHeapRecord2) temporaryHeapRecord1
+              else (temporaryHeapRecord1, temporaryHeapRecord2) match {
+                case (Some((label1, cause1, pcs1, heaps1)), Some((label2, cause2, _, heaps2))) =>
+                  if (label1 == label2 && cause1 == cause2) Some(label1, cause1, pcs1, heaps1 ++ heaps2) else {
+                    // This case should not occur if heaps have been recorded correctly
+                    SiliconRunner.logger.warn(s"Attempted to merge states with different temporary heap records: $label1 and $label2")
+                    None
+                  }
+                case (Some(tmp1), None) => Some(tmp1)
+                case (None, Some(tmp2)) => Some(tmp2)
+                case (None, None) => None
+              }
+            val functionRecorder3 =
+              if (functionRecorder1 eq functionRecorder2) functionRecorder1
+              else functionRecorder1.merge(functionRecorder2)
             val triggerExp3 = triggerExp1 && triggerExp2
-            val possibleTriggers3 = possibleTriggers1 ++ possibleTriggers2
-            val constrainableARPs3 = constrainableARPs1 ++ constrainableARPs2
-            val quantifiedVariables3 = (quantifiedVariables1 ++ quantifiedVariables2).distinct
-            val packagingWandSnapshots3 = (packagingWandSnapshots1 ++ packagingWandSnapshots2).distinct
+            val possibleTriggers3 =
+              if (possibleTriggers1 eq possibleTriggers2) possibleTriggers1
+              else if (possibleTriggers2.isEmpty) possibleTriggers1
+              else if (possibleTriggers1.isEmpty) possibleTriggers2
+              else possibleTriggers1 ++ possibleTriggers2
+            val constrainableARPs3 =
+              if (constrainableARPs1 eq constrainableARPs2) constrainableARPs1
+              else constrainableARPs1 ++ constrainableARPs2
+            val quantifiedVariables3 =
+              if (quantifiedVariables1 eq quantifiedVariables2) quantifiedVariables1
+              else if (quantifiedVariables2.isEmpty) quantifiedVariables1
+              else if (quantifiedVariables1.isEmpty) quantifiedVariables2
+              else (quantifiedVariables1 ++ quantifiedVariables2).distinct
+            val packagingWandSnapshots3 =
+              if (packagingWandSnapshots1 eq packagingWandSnapshots2) packagingWandSnapshots1
+              else if (packagingWandSnapshots2.isEmpty) packagingWandSnapshots1
+              else if (packagingWandSnapshots1.isEmpty) packagingWandSnapshots2
+              else (packagingWandSnapshots1 ++ packagingWandSnapshots2).distinct
 
-            val smCache3 = smCache1.union(smCache2)
-            val pmCache3 = pmCache1 ++ pmCache2
+            val smCache3 =
+              if (smCache1 eq smCache2) smCache1
+              else smCache1.union(smCache2)
+            val pmCache3 =
+              if (pmCache1 eq pmCache2) pmCache1
+              else if (pmCache2.isEmpty) pmCache1
+              else if (pmCache1.isEmpty) pmCache2
+              else pmCache1 ++ pmCache2
 
-            val ssCache3 = ssCache1 ++ ssCache2
+            val ssCache3 =
+              if (ssCache1 eq ssCache2) ssCache1
+              else if (ssCache2.isEmpty) ssCache1
+              else if (ssCache1.isEmpty) ssCache2
+              else ssCache1 ++ ssCache2
             val moreCompleteExhale3 = moreCompleteExhale || moreCompleteExhale2
             val moreCompleteExhaleQP3 = moreCompleteExhaleQP || moreCompleteExhaleQP2
 
-            s1.copy(oldHeaps = oldHeaps3,
-                    debugOldHeaps = debugOldHeaps3,
-                    temporaryHeapRecord = temporaryHeapRecord3,
-                    functionRecorder = functionRecorder3,
-                    possibleTriggers = possibleTriggers3,
-                    triggerExp = triggerExp3,
-                    constrainableARPs = constrainableARPs3,
-                    quantifiedVariables = quantifiedVariables3,
-                    packagingWandSnapshots = packagingWandSnapshots3,
-                    ssCache = ssCache3,
-                    smCache = smCache3,
-                    pmCache = pmCache3,
-                    moreCompleteExhale = moreCompleteExhale3,
-                    moreCompleteExhaleQP = moreCompleteExhaleQP3)
+            if ((oldHeaps3 eq oldHeaps1) &&
+                (debugOldHeaps3 eq debugOldHeaps1) &&
+                (temporaryHeapRecord3 eq temporaryHeapRecord1) &&
+                (functionRecorder3 eq functionRecorder1) &&
+                (possibleTriggers3 eq possibleTriggers1) &&
+                (triggerExp3 == triggerExp1) &&
+                (constrainableARPs3 eq constrainableARPs1) &&
+                (quantifiedVariables3 eq quantifiedVariables1) &&
+                (packagingWandSnapshots3 eq packagingWandSnapshots1) &&
+                (ssCache3 eq ssCache1) &&
+                (smCache3 eq smCache1) &&
+                (pmCache3 eq pmCache1) &&
+                (moreCompleteExhale3 == moreCompleteExhale) &&
+                (moreCompleteExhaleQP3 == moreCompleteExhaleQP)) {
+              s1
+            } else {
+              s1.copy(oldHeaps = oldHeaps3,
+                      debugOldHeaps = debugOldHeaps3,
+                      temporaryHeapRecord = temporaryHeapRecord3,
+                      functionRecorder = functionRecorder3,
+                      possibleTriggers = possibleTriggers3,
+                      triggerExp = triggerExp3,
+                      constrainableARPs = constrainableARPs3,
+                      quantifiedVariables = quantifiedVariables3,
+                      packagingWandSnapshots = packagingWandSnapshots3,
+                      ssCache = ssCache3,
+                      smCache = smCache3,
+                      pmCache = pmCache3,
+                      moreCompleteExhale = moreCompleteExhale3,
+                      moreCompleteExhaleQP = moreCompleteExhaleQP3)
+            }
 
           case _ =>
             println(s1.possibleTriggers.toString() + s2.possibleTriggers.toString())
@@ -607,12 +661,22 @@ object State {
   }
 
   def preserveAfterLocalEvaluation(pre: State, post: State): State = {
-    pre.copy(debugOldHeaps = post.debugOldHeaps,
-             temporaryHeapRecord = post.temporaryHeapRecord,
-             functionRecorder = post.functionRecorder,
-             possibleTriggers = post.possibleTriggers,
-             smCache = post.smCache,
-             constrainableARPs = post.constrainableARPs)
+    if ((pre eq post) ||
+        ((pre.debugOldHeaps eq post.debugOldHeaps) &&
+         (pre.temporaryHeapRecord eq post.temporaryHeapRecord) &&
+         (pre.functionRecorder eq post.functionRecorder) &&
+         (pre.possibleTriggers eq post.possibleTriggers) &&
+         (pre.smCache eq post.smCache) &&
+         (pre.constrainableARPs eq post.constrainableARPs))) {
+      pre
+    } else {
+      pre.copy(debugOldHeaps = post.debugOldHeaps,
+               temporaryHeapRecord = post.temporaryHeapRecord,
+               functionRecorder = post.functionRecorder,
+               possibleTriggers = post.possibleTriggers,
+               smCache = post.smCache,
+               constrainableARPs = post.constrainableARPs)
+    }
   }
 
   def conflictFreeUnionOrAbort[K, V](m1: Map[K, V], m2: Map[K, V]): Map[K,V] =

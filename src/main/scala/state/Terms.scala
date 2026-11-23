@@ -1011,6 +1011,58 @@ class Or private[terms] (val ts: Seq[Term]) extends BooleanTerm
  *       that conflicts with using extractor objects to simplify terms,
  *       since extractor objects can't be type-parametrised.
  */
+object BooleanSimplification {
+  val enabled: Boolean = !"false".equals(System.getProperty("silicon.exp.simplifyFormulas"))
+
+  @inline
+  def isComplementary(t0: Term, t1: Term): Boolean = (t0, t1) match {
+    case (Not(a), b) => a == b
+    case (a, Not(b)) => a == b
+    case _ => false
+  }
+
+  def hasComplementaryPair(ts: Seq[Term]): Boolean = {
+    var hasNeg = false
+    val it = ts.iterator
+    while (it.hasNext && !hasNeg) {
+      if (it.next().isInstanceOf[Not]) hasNeg = true
+    }
+    if (!hasNeg) false
+    else ts.exists {
+      case Not(a) => ts.contains(a)
+      case _ => false
+    }
+  }
+
+  @inline
+  def lhsAbsorbs(lhs: Term, rhsAtom: Term): Boolean =
+    lhs == rhsAtom || (lhs match {
+      case And(cs) => cs.contains(rhsAtom)
+      case _ => false
+    })
+
+  /** Recognises pure propositional tautologies produced when joining feasible branches
+    * (`c || !c` and `c ==> c`) so empty auxiliary quantifiers are not emitted to the prover.
+    */
+  def isTrivialTautology(t: Term): Boolean = t match {
+    case True => true
+    case Or(ts) =>
+      (ts.length == 2 && isComplementary(ts(0), ts(1))) ||
+      hasComplementaryPair(ts) ||
+      ts.exists(isTrivialTautology)
+    case And(ts) =>
+      ts.forall(isTrivialTautology)
+    case Implies(lhs, rhs) =>
+      lhs == False || isTrivialTautology(rhs) || lhsAbsorbs(lhs, rhs) || (rhs match {
+        case And(cs) => cs.forall(c => lhsAbsorbs(lhs, c) || isTrivialTautology(c))
+        case _ => false
+      })
+    case Quantification(Forall, _, body, _, _, _, _) =>
+      isTrivialTautology(body)
+    case _ => false
+  }
+}
+
 object Or extends GeneralCondFlyweightFactory[Iterable[Term], Seq[Term], Term, Or] {
   def apply(ts: Term*) = createOr(ts)
   def apply(ts: Iterable[Term]) = createOr(ts.toSeq)

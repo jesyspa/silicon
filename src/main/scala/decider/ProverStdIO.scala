@@ -47,10 +47,25 @@ abstract class ProverStdIO(uniqueId: String,
   /* The number of assertions retried in a fresh prover since the prover was started */
   protected var retries: Int = 0
   protected val retryPolicy: AssertRetryPolicy = AssertRetryPolicy.current
-  /* The commands that make up the prover's current state, one buffer per push-pop scope, such that
+  /* The commands that make up the prover's current state, one reusable buffer per push-pop scope, such that
    * the state can be rebuilt after a prover restart. See [[restartAfterMemoryOut]].
    */
-  protected var scopedCommands: Vector[mutable.ArrayBuffer[String]] = Vector(mutable.ArrayBuffer())
+  private var scopeBuffers: Array[mutable.ArrayBuffer[String]] = {
+    val arr = new Array[mutable.ArrayBuffer[String]](32)
+    arr(0) = mutable.ArrayBuffer()
+    arr
+  }
+  private var scopeCount: Int = 1
+
+  private def resetScopeBuffers(): Unit = {
+    var i = 0
+    while (i < scopeCount) {
+      if (scopeBuffers(i) != null) scopeBuffers(i).clear()
+      i += 1
+    }
+    if (scopeBuffers(0) == null) scopeBuffers(0) = mutable.ArrayBuffer()
+    scopeCount = 1
+  }
   protected var lastCheckRanOutOfMemory: Boolean = false
   /* Whether the current refutation attempt is retried in a fresh prover if it reaches its timeout */
   protected var isRetryableAttempt: Boolean = false
@@ -142,7 +157,7 @@ abstract class ProverStdIO(uniqueId: String,
     userArgs = userArgsString
     processArgs = userArgsString
     retries = 0
-    scopedCommands = Vector(mutable.ArrayBuffer())
+    resetScopeBuffers()
     pending.clear()
     pendingPushes = 0
     ranOutOfMemorySinceLastCheck = false
@@ -249,7 +264,7 @@ abstract class ProverStdIO(uniqueId: String,
       proverShutdownHook = null
       allDecls = Seq()
       allEmits = Seq()
-      scopedCommands = Vector(mutable.ArrayBuffer())
+      resetScopeBuffers()
       preambleAssumptions = Seq()
 
       Cleanup.run(
@@ -290,10 +305,23 @@ abstract class ProverStdIO(uniqueId: String,
   private def sendPush(n: Int, timeout: Option[Int]): Unit = {
     /* Z3 cancels a push if the resource limit of an earlier bounded check is still in force */
     setTimeout(timeout)
-    val cmd = (if (n == 1) "(push)" else "(push " + n + ")") + " ; " + (scopedCommands.length - 1 + n)
+    val cmd = (if (n == 1) "(push)" else "(push " + n + ")") + " ; " + (scopeCount - 1 + n)
     writeLine(cmd)
     readSuccess()
-    scopedCommands ++= Vector.fill(n)(mutable.ArrayBuffer[String]())
+    val needed = scopeCount + n
+    if (needed > scopeBuffers.length) {
+      var cap = scopeBuffers.length * 2
+      while (cap < needed) cap *= 2
+      scopeBuffers = java.util.Arrays.copyOf(scopeBuffers, cap)
+    }
+    var i = scopeCount
+    while (i < needed) {
+      val buf = scopeBuffers(i)
+      if (buf == null) scopeBuffers(i) = mutable.ArrayBuffer()
+      else buf.clear()
+      i += 1
+    }
+    scopeCount = needed
   }
 
   def pop(n: Int = 1): Unit = {
@@ -375,19 +403,32 @@ abstract class ProverStdIO(uniqueId: String,
   private def sendCommand(cmd: String): Unit = {
     writeLine(cmd)
     readSuccess()
-    scopedCommands.last += cmd
+    scopeBuffers(scopeCount - 1) += cmd
   }
 
   /* Closes n scopes in the prover; the caller accounts for them in pushPopScopeDepth */
   private def sendPop(n: Int): Unit = {
-    val cmd = (if (n == 1) "(pop)" else "(pop " + n + ")") + " ; " + (scopedCommands.length - 1)
+    val cmd = (if (n == 1) "(pop)" else "(pop " + n + ")") + " ; " + (scopeCount - 1)
     writeLine(cmd)
     readSuccess()
     /* Declarations are global (see the prover config), hence only assertions are popped */
-    val popped = scopedCommands.takeRight(n).flatten.filterNot(_.startsWith("(assert"))
-    scopedCommands = scopedCommands.dropRight(n)
-    scopedCommands.last ++= popped
-    if (suspendedFromDepth.exists(_ > scopedCommands.length - 1)) {
+    val newCount = scopeCount - n
+    val parent = scopeBuffers(newCount - 1)
+    var s = newCount
+    while (s < scopeCount) {
+      val buf = scopeBuffers(s)
+      var j = 0
+      val len = buf.length
+      while (j < len) {
+        val c = buf(j)
+        if (!c.startsWith("(assert")) parent += c
+        j += 1
+      }
+      buf.clear()
+      s += 1
+    }
+    scopeCount = newCount
+    if (suspendedFromDepth.exists(_ > scopeCount - 1)) {
       comment(s"Resuming prover $uniqueId")
       restartAndReplay()
     }
@@ -627,7 +668,7 @@ abstract class ProverStdIO(uniqueId: String,
     val cmd = s"(assert (=> $guardApp (not $goal)))"
     writeLine(cmd)
     readSuccess()
-    scopedCommands.last += cmd
+    scopeBuffers(scopeCount - 1) += cmd
 
     val startTime = System.currentTimeMillis()
     writeLine(s"(check-sat $guardApp)")
@@ -733,7 +774,7 @@ abstract class ProverStdIO(uniqueId: String,
 
     if (isOutOfMemory(answer)) {
       restartAfterMemoryOut()
-      if (suspendedFromDepth.isEmpty && !replay(lastCommand)) suspend(scopedCommands.length - 1)
+      if (suspendedFromDepth.isEmpty && !replay(lastCommand)) suspend(scopeCount - 1)
     } else {
       expectSuccess(answer)
     }
@@ -818,11 +859,11 @@ abstract class ProverStdIO(uniqueId: String,
     suspendedFromDepth = None
 
     /* The replayed commands are not logged again. A (push) makes Z3 process the preceding scope. */
-    comment(s"Replaying the prover state (${scopedCommands.length - 1} scopes)")
+    comment(s"Replaying the prover state (${scopeCount - 1} scopes)")
     var depth = 0
-    while (suspendedFromDepth.isEmpty && depth < scopedCommands.length) {
+    while (suspendedFromDepth.isEmpty && depth < scopeCount) {
       if (depth > 0 && !replay("(push)")) suspend(depth - 1)
-      else if (!scopedCommands(depth).forall(replay)) suspend(depth)
+      else if (!scopeBuffers(depth).forall(replay)) suspend(depth)
       depth += 1
     }
   }

@@ -278,15 +278,36 @@ object chunkSupporter extends ChunkSupportRules {
                 args: Iterable[Term],
                 v: Verifier)
                : Option[CH] = {
-    val relevantChunks = findChunksWithID[CH](chunks, id)
-    findChunkLiterally(relevantChunks, args) orElse findChunkWithProver(relevantChunks, args, v)
+    val runtimeCls = scala.reflect.classTag[CH].runtimeClass
+    var candidates: scala.collection.mutable.ArrayBuffer[CH] = null
+    val it = chunks.iterator
+    while (it.hasNext) {
+      val c = it.next()
+      if (runtimeCls.isInstance(c)) {
+        val ch = c.asInstanceOf[CH]
+        if (id == ch.id) {
+          if (ch.args == args) return Some(ch)
+          if (candidates == null) candidates = scala.collection.mutable.ArrayBuffer.empty[CH]
+          candidates += ch
+        }
+      }
+    }
+    if (candidates == null) None
+    else findChunkWithProver(candidates, args, v)
   }
 
   def findChunksWithID[CH <: NonQuantifiedChunk: ClassTag](chunks: Iterable[Chunk], id: ChunkIdentifer): Iterable[CH] = {
-    chunks.flatMap {
-      case c: CH if id == c.id => Some(c)
-      case _ => None
+    val runtimeCls = scala.reflect.classTag[CH].runtimeClass
+    val buf = scala.collection.mutable.ArrayBuffer.empty[CH]
+    val it = chunks.iterator
+    while (it.hasNext) {
+      val c = it.next()
+      if (runtimeCls.isInstance(c)) {
+        val ch = c.asInstanceOf[CH]
+        if (id == ch.id) buf += ch
+      }
     }
+    buf
   }
 
 /** Extract the chunks with resource matching id.
@@ -311,9 +332,6 @@ object chunkSupporter extends ChunkSupportRules {
     }
 
     (relevantChunks, otherChunks)
-  }
-  private def findChunkLiterally[CH <: NonQuantifiedChunk](chunks: Iterable[CH], args: Iterable[Term]) = {
-    chunks find (ch => ch.args == args)
   }
 
   private def findChunkWithProver[CH <: NonQuantifiedChunk](chunks: Iterable[CH], args: Iterable[Term], v: Verifier) = {

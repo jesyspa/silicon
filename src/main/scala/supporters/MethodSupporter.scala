@@ -86,7 +86,7 @@ trait DefaultMethodVerificationUnitProvider extends VerifierComponent { v: Verif
                          methodCfg = body)
 
       val s0 = if (producer.debugOn) v.startKeyHeap(s, "nil", InhalePre) else s
-      val emptyPCS = v.decider.pcs.duplicate()
+      val emptyPCS = if (producer.debugOn) v.decider.pcs.duplicate() else null
 
       if (Verifier.config.printMethodCFGs()) {
         viper.silicon.common.io.toFile(

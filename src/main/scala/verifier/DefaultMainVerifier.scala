@@ -27,13 +27,12 @@ import viper.silicon.reporting.{MultiRunRecorders, condenseToViperResult}
 import viper.silicon.rules.maskHeapSupporter
 import viper.silicon.state._
 import viper.silicon.state.terms.{Decl, Sort, Term, sorts}
-import viper.silicon.supporters.{AnnotationSupporter, DefaultDomainsContributor, DefaultMapsContributor, DefaultMultisetsContributor, DefaultPredicateVerificationUnitProvider, DefaultSequencesContributor, DefaultSetsContributor, MagicWandSnapFunctionsContributor, PredicateData}
+import viper.silicon.supporters.{AnnotationSupporter, DefaultDomainsContributor, DefaultMapsContributor, DefaultMultisetsContributor, DefaultPredicateVerificationUnitProvider, DefaultSequencesContributor, DefaultSetsContributor, MagicWandSnapFunctionsContributor, PredicateData, ProgramAnalysis}
 import viper.silicon.supporters.qps._
 import viper.silicon.supporters.functions.{DefaultFunctionVerificationUnitProvider, FunctionData}
 import viper.silicon.utils.Counter
-import viper.silver.ast.utility.QuantifiedPermissions.collectInDependencies
 import viper.silver.ast.utility.rewriter.Traverse
-import viper.silver.ast.{BackendType, Member}
+import viper.silver.ast.Member
 import viper.silver.cfg.silver.SilverCfg
 import viper.silver.frontend.FrontendStateCache
 import viper.silver.reporter._
@@ -177,8 +176,9 @@ class DefaultMainVerifier(config: Config,
       * (top-down should also work, but the default of 'innermost' won't).
       * See also [[viper.silicon.utils.ast.autoTrigger]].
       */
-    var program: ast.Program =
-      originalProgram.transform({
+    def autoTriggerNode[N <: ast.Node](node: N): N = {
+      if (!ProgramAnalysis.containsQuantifier(node)) node
+      else node.transform({
         case forall: ast.Forall if forall.isPure =>
           val res = viper.silicon.utils.ast.autoTrigger(forall, forall.autoTrigger)
           if (res.triggers.isEmpty)
@@ -192,6 +192,17 @@ class DefaultMainVerifier(config: Config,
           reporter report QuantifierChosenTriggersMessage(res, res.triggers, exists.triggers)
           res
       }, Traverse.BottomUp)
+    }
+
+    var program: ast.Program =
+      if (!ProgramAnalysis.containsQuantifier(originalProgram)) originalProgram
+      else originalProgram.copy(
+        domains = originalProgram.domains.map(autoTriggerNode),
+        functions = originalProgram.functions.map(autoTriggerNode),
+        predicates = originalProgram.predicates.map(autoTriggerNode),
+        methods = originalProgram.methods.map(autoTriggerNode),
+        extensions = originalProgram.extensions.map(autoTriggerNode)
+      )(originalProgram.pos, originalProgram.info, originalProgram.errT)
 
     // TODO: Autotrigger for cfgs.
 
@@ -207,27 +218,41 @@ class DefaultMainVerifier(config: Config,
 
     _verificationPoolManager.ensureStarted(program.methods.count(!excludeMethod(_)) + cfgs.length)
 
+    val skipUnusedMainProver =
+      !"false".equals(System.getProperty("silicon.exp.skipUnusedMainProver")) &&
+      program.functions.isEmpty &&
+      program.predicates.isEmpty &&
+      !config.enableDebugging() &&
+      !config.ideModeAdvanced() &&
+      _verificationPoolManager.workerVerifiers != null &&
+      _verificationPoolManager.workerVerifiers.nonEmpty
 
-    allProvers.comment("Started: " + new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(System.currentTimeMillis()) /*bookkeeper.formattedStartTime*/)
-    allProvers.comment("Silicon.version: " + Silicon.version)
-    allProvers.comment(s"Input file: ${inputFile.getOrElse("<unknown>")}")
-    allProvers.comment(s"Verifier id: $uniqueId")
-    allProvers.comment("-" * 60)
-    allProvers.comment("Begin preamble")
+    if (skipUnusedMainProver) {
+      decider.prover.stop()
+    }
+    val preambleSink: ProverLike =
+      if (skipUnusedMainProver) _verificationPoolManager.pooledVerifiers else allProvers
 
-    allProvers.comment("/" * 10 + " Static preamble")
+    preambleSink.comment("Started: " + new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(System.currentTimeMillis()) /*bookkeeper.formattedStartTime*/)
+    preambleSink.comment("Silicon.version: " + Silicon.version)
+    preambleSink.comment(s"Input file: ${inputFile.getOrElse("<unknown>")}")
+    preambleSink.comment(s"Verifier id: $uniqueId")
+    preambleSink.comment("-" * 60)
+    preambleSink.comment("Begin preamble")
+
+    preambleSink.comment("/" * 10 + " Static preamble")
     _verificationPoolManager.withBroadcastBatch {
-      emitStaticPreamble(allProvers)
+      emitStaticPreamble(preambleSink)
     }
 
     val (functionData, predicateData) = _verificationPoolManager.withBroadcastBatch {
-      analyzeProgramAndEmitPreambleContributions(program, allProvers) // TODO: Add support for cfgs.
+      analyzeProgramAndEmitPreambleContributions(program, preambleSink) // TODO: Add support for cfgs.
     }
 
-    allProvers.comment("End preamble")
-    allProvers.comment("-" * 60)
+    preambleSink.comment("End preamble")
+    preambleSink.comment("-" * 60)
 
-    allProvers.saturate(config.proverSaturationTimeouts.afterPrelude)
+    preambleSink.saturate(config.proverSaturationTimeouts.afterPrelude)
 
     /* TODO: A workaround for Silver issue #94. toList must be before flatMap.
      *       Otherwise Set will be used internally and some error messages will be lost.
@@ -357,13 +382,11 @@ class DefaultMainVerifier(config: Config,
                                  program: ast.Program,
                                  functionData: Map[String, FunctionData],
                                  predicateData: Map[String, PredicateData]): State = {
-    val quantifiedFields = InsertionOrderedSet(ast.utility.QuantifiedPermissions.quantifiedFields(member, program))
-    val quantifiedPredicates = InsertionOrderedSet(ast.utility.QuantifiedPermissions.quantifiedPredicates(member, program))
-    val quantifiedMagicWands = InsertionOrderedSet(ast.utility.QuantifiedPermissions.quantifiedMagicWands(member, program)).map(MagicWandIdentifier(_, program))
-    val resourceTriggers: InsertionOrderedSet[Any] = InsertionOrderedSet(ast.utility.QuantifiedPermissions.resourceTriggers(member, program)).map{
-      case wand: ast.MagicWand => MagicWandIdentifier(wand, program)
-      case r => r
-    }
+    val analysis = ProgramAnalysis.of(program)
+    val quantifiedFields = analysis.quantifiedFields(member)
+    val quantifiedPredicates = analysis.quantifiedPredicates(member)
+    val quantifiedMagicWands = analysis.quantifiedMagicWands(member)
+    val resourceTriggers: InsertionOrderedSet[Any] = analysis.resourceTriggers(member)
 
     val mce = AnnotationSupporter.getExhaleMode(member, reporter) match {
       case Some(ExhaleMode.MoreComplete) => true
@@ -585,11 +608,7 @@ class DefaultMainVerifier(config: Config,
     sortWrapperDeclarationOrder foreach (component =>
       emitSortWrappers(component.sortsAfterAnalysis, sink))
 
-    val backendTypes = new mutable.LinkedHashSet[BackendType]
-    program.visit{
-      case t: BackendType => backendTypes.add(t)
-    }
-    emitSortWrappers(backendTypes map symbolConverter.toSort, sink)
+    emitSortWrappers(ProgramAnalysis.of(program).backendTypes map symbolConverter.toSort, sink)
 
     sink.comment("/" * 10 + " Symbols")
     symbolDeclarationOrder foreach (component =>

@@ -14,6 +14,7 @@ import viper.silicon.interfaces.decider.{ProverLike, TermConverter}
 import viper.silicon.state.SymbolConverter
 import viper.silicon.state.terms.sorts.{PredHeapSort, PredMaskSort, WandHeapSort}
 import viper.silicon.state.terms.{Sort, SortDecl, sorts}
+import viper.silicon.supporters.ProgramAnalysis
 import viper.silicon.verifier.Verifier
 
 
@@ -66,7 +67,7 @@ class MaskHeapFunctionsContributor(preambleReader: PreambleReader[String, String
           + sorts.MaskSort)
       predicateSorts = InsertionOrderedSet(Seq(PredHeapSort, PredMaskSort))
 
-      if (program.existsDefined { case ast.MagicWand(_, _) => true }) {
+      if (ProgramAnalysis.of(program).hasMagicWand) {
         wandHeapsRequired = true
         predicateSorts += WandHeapSort
       }

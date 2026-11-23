@@ -21,6 +21,10 @@ trait QuantifierSupporter {
   def detectQuantificationProblems(quantification: Quantification): Seq[String]
 }
 
+object DefaultQuantifierSupporter {
+  val groupAuxTriggers: Boolean = !"false".equals(System.getProperty("silicon.exp.groupAuxTriggers"))
+}
+
 class DefaultQuantifierSupporter(triggerGenerator: TriggerGenerator) extends QuantifierSupporter {
   def autoTrigger(q: Quantification): Quantification = {
       if (q.triggers.nonEmpty) {
@@ -81,25 +85,47 @@ class DefaultQuantifierSupporter(triggerGenerator: TriggerGenerator) extends Qua
       case _ => t
     }
 
-    // TODO: Keep all heap-independent triggers under one quantifier instead of splitting
-    q.triggers
-      // : Seq[Trigger]
-      // Find heap dependencies for each trigger separately
-      .map({ case Trigger(ts) => (ts, ts.flatMap(computeHeapDeps))})
-      .distinct
-      // : Seq[(Trigger, Seq[Term])]
-      // Map all heap dependencies to fresh variables
-      .map({ case (ts, deps) => (ts, deps.map(t => (t, fresh("proj", t.sort, Option.when(evaluator.debugOn)(PUnknown())))).toMap)})
-      // : Seq[(Trigger, Map[Term, Var])]
-      // For each trigger, create a new quantifier where all heap dependencies are replaced with the new variables
-      .map({ case (ts, m) =>
-        Quantification(
-          q.q,
-          q.vars ++ m.values.toSeq,
-          q.body,
-          Seq(Trigger(ts.map(replaceHeapDeps(_,m)))),
-          q.name,
-          q.isGlobal)})
+    if (BooleanSimplification.enabled && BooleanSimplification.isTrivialTautology(q.body)) {
+      return Seq.empty
+    }
+    if (BooleanSimplification.enabled && DefaultQuantifierSupporter.groupAuxTriggers) {
+      val triggersWithDeps = q.triggers
+        .map({ case Trigger(ts) => (ts, ts.flatMap(computeHeapDeps)) })
+        .distinct
+
+      val (noDeps, withDeps) = triggersWithDeps.partition(_._2.isEmpty)
+      val keptHeapIndep =
+        if (noDeps.isEmpty) Seq.empty
+        else Seq(Quantification(q.q, q.vars, q.body, noDeps.map(td => Trigger(td._1)), q.name, q.isGlobal, q.weight))
+
+      val splitHeapDep = withDeps
+        .map({ case (ts, deps) => (ts, deps.distinct.map(t => (t, fresh("proj", t.sort, Option.when(evaluator.debugOn)(PUnknown())))).toMap) })
+        .map({ case (ts, m) =>
+          Quantification(
+            q.q,
+            q.vars ++ m.values.toSeq,
+            q.body,
+            Seq(Trigger(ts.map(replaceHeapDeps(_, m)))),
+            q.name,
+            q.isGlobal,
+            q.weight)
+        })
+
+      keptHeapIndep ++ splitHeapDep
+    } else {
+      q.triggers
+        .map({ case Trigger(ts) => (ts, ts.flatMap(computeHeapDeps))})
+        .distinct
+        .map({ case (ts, deps) => (ts, deps.map(t => (t, fresh("proj", t.sort, Option.when(evaluator.debugOn)(PUnknown())))).toMap)})
+        .map({ case (ts, m) =>
+          Quantification(
+            q.q,
+            q.vars ++ m.values.toSeq,
+            q.body,
+            Seq(Trigger(ts.map(replaceHeapDeps(_,m)))),
+            q.name,
+            q.isGlobal)})
+    }
   }
 
   def detectQuantificationProblems(quantification: Quantification): Seq[String] = {

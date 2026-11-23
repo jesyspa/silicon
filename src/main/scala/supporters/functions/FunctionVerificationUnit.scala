@@ -22,7 +22,7 @@ import viper.silicon.state.terms.predef.`?s`
 import viper.silicon.common.collections.immutable.InsertionOrderedSet
 import viper.silicon.decider.Decider
 import viper.silicon.rules.{consumer, evaluator, executionFlowController, producer}
-import viper.silicon.supporters.{AnnotationSupporter, PredicateData}
+import viper.silicon.supporters.{AnnotationSupporter, PredicateData, ProgramAnalysis}
 import viper.silicon.utils.ast.{BigAnd, simplifyVariableName}
 import viper.silicon.verifier.{Verifier, VerifierComponent}
 import viper.silicon.utils.{freshSnap, toSf}
@@ -96,10 +96,11 @@ trait DefaultFunctionVerificationUnitProvider extends VerifierComponent { v: Ver
       // The order here is relevant because it determines the output of units(), which determines verification order.
       val heights = heightMap.sortBy(fh => (fh._2, -functionOrderInProgram(fh._1))).reverse
 
+      val analysis = ProgramAnalysis.of(program)
       functionData = toMap(
         heights.map { case (funcName, height) =>
           val func = program.findFunction(funcName)
-          val quantifiedFields = InsertionOrderedSet(ast.utility.QuantifiedPermissions.quantifiedFields(func, program))
+          val quantifiedFields = analysis.quantifiedFields(func)
           val data = new FunctionData(func, height, quantifiedFields, program)(symbolConverter, expressionTranslator,
                                       identifierFactory, pred => predicateData(pred.name), functionEncoding,
                                       Verifier.config, reporter)

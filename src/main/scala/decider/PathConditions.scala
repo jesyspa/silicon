@@ -10,7 +10,6 @@ import viper.silicon.debugger.DebugExp
 import viper.silicon.Stack
 import viper.silicon.common.collections.immutable.InsertionOrderedSet
 import viper.silicon.state.terms._
-import viper.silicon.utils.Counter
 import viper.silicon.verifier.Verifier
 import viper.silver.ast
 import viper.silver.ast.TrueLit
@@ -301,8 +300,10 @@ private trait LayeredPathConditionStackLike {
         case None =>
       }
 
-      conditionalTerms :+=
-        Implies(implicationLHS, And(layer.nonGlobalAssumptions))
+      val imp = Implies(implicationLHS, And(layer.nonGlobalAssumptions))
+      if (!BooleanSimplification.enabled || imp != True) {
+        conditionalTerms :+= imp
+      }
     }
 
     unconditionalTerms ++ conditionalTerms
@@ -367,14 +368,17 @@ private trait LayeredPathConditionStackLike {
 
       globals ++= layer.globalAssumptions ++ additionalGlobals
 
-      nonGlobals :+=
-        Quantification(
-          quantifier,
-          qvars,
-          Implies(actualBranchCondition, And(trueNonGlobals)),
-          triggers,
-          name,
-          isGlobal)
+      val body = Implies(actualBranchCondition, And(trueNonGlobals))
+      if (!BooleanSimplification.enabled || !BooleanSimplification.isTrivialTautology(body)) {
+        nonGlobals :+=
+          Quantification(
+            quantifier,
+            qvars,
+            body,
+            triggers,
+            name,
+            isGlobal)
+      }
     }
 
     (globals, nonGlobals)
@@ -464,17 +468,21 @@ private class DefaultRecordedPathConditions(from: Stack[PathConditionStackLayer]
   }
 }
 
-private[decider] class LayeredPathConditionStack
+private[decider] class LayeredPathConditionStack private (initInitialScope: Boolean)
     extends LayeredPathConditionStackLike
        with PathConditionStack
        with Cloneable {
 
+  def this() = this(initInitialScope = true)
+
   /* private */ var layers: Stack[PathConditionStackLayer] = Stack.empty
   /* The length of layers, which is a linked list */
   private var layerCount = 0
-  private var markToLength: Map[Mark, Int] = Map.empty
+  /* Indexed by Mark (sequential non-negative ids from nextMarkId); -1 means popped/unused. */
+  private var markHeights: Array[Int] = new Array[Int](64)
+  private var nextMarkId: Int = 0
+  private var openNonScopeMarks: Int = 0
   private var scopeMarks: List[Mark] = List.empty
-  private var markCounter = new Counter(0)
 
   /* Set of assumptions across all layers. Maintained separately to improve performance. */
   private var allAssumptions = InsertionOrderedSet.empty[Term]
@@ -484,7 +492,9 @@ private[decider] class LayeredPathConditionStack
    */
   private var knownBranchConditions: Stack[Term] = null
 
-  pushScope() /* Create an initial layer on the stack */
+  if (initInitialScope) {
+    pushScope() /* Create an initial layer on the stack */
+  }
 
   def setCurrentBranchCondition(condition: Term, conditionExp: (ast.Exp, Option[ast.Exp])): Unit = {
     /* TODO: Split condition into top-level conjuncts as well? */
@@ -549,48 +559,49 @@ private[decider] class LayeredPathConditionStack
   }
 
   private def pushLayer(): Mark = {
-    val mark = markCounter.next()
+    val mark = nextMarkId
+    nextMarkId += 1
+    if (mark >= markHeights.length) {
+      markHeights = java.util.Arrays.copyOf(markHeights, markHeights.length * 2)
+    }
+    markHeights(mark) = layerCount
 
-    markToLength += (mark -> layerCount)
+    val debugExpStackTmp =
+      if (layers.nonEmpty && Verifier.config != null && Verifier.config.enableDebugging()) layers.head.debugExpStack
+      else Stack.empty
 
-    val debugExpStackTmp = if (layers.nonEmpty && Verifier.config.enableDebugging()) layers.head.debugExpStack else Stack.empty
+    val newLayer = new PathConditionStackLayer()
+    newLayer.debugExpStack = debugExpStackTmp
+    if (debugExpStackTmp.nonEmpty) newLayer.inheritedDebugExps = InsertionOrderedSet(debugExpStackTmp.flatten)
 
-    layers = new PathConditionStackLayer() +: layers
+    layers = newLayer +: layers
     layerCount += 1
-
-    layers.head.debugExpStack = debugExpStackTmp
-    if (debugExpStackTmp.nonEmpty) layers.head.inheritedDebugExps = InsertionOrderedSet(debugExpStackTmp.flatten)
     mark
   }
 
   def popUntilMark(mark: Mark): Unit = {
-    assert(markToLength.contains(mark), "Cannot pop unknown mark")
+    assert(mark >= 0 && mark < nextMarkId && markHeights(mark) >= 0, "Cannot pop unknown mark")
+    openNonScopeMarks -= 1
     popLayersAndRemoveMark(mark)
   }
 
   private def popLayersAndRemoveMark(mark: Mark): Unit = {
-    val targetLength = markToLength(mark)
+    val targetLength = markHeights(mark)
     val dropLength = layerCount - targetLength
 
-    markToLength = markToLength - mark
+    markHeights(mark) = -1
     knownBranchConditions = null
 
-//    /* Remove marks pointing to popped layers (including mark itself) */
-//    markToLength = markToLength filter (_._2 < targetLength)
-//      /* TODO: Performance? Do lazily, e.g. when isEmpty is called? */
-
-    var i = 0
-    layers =
-      layers.dropWhile(layer => {
-        i += 1
-        allAssumptions --= layer.assumptions
-        i < dropLength
-        /* If i < dropLength is false, the current - and last-to-drop - layer won't be
-         * dropped, but its assumptions have already been removed from allAssumptions.
-         * Subsequently taking the tail of the remaining layers results in also
-         * dropping the last layer that needs to be dropped.
-         */
-      }).tail
+    var cur = layers
+    var remaining = dropLength.max(1)
+    while (remaining > 0) {
+      val layer = cur.head
+      if (layer.globalAssumptions.nonEmpty) allAssumptions --= layer.globalAssumptions
+      if (layer.nonGlobalAssumptions.nonEmpty) allAssumptions --= layer.nonGlobalAssumptions
+      cur = cur.tail
+      remaining -= 1
+    }
+    layers = cur
     layerCount -= dropLength.max(1)
   }
 
@@ -643,10 +654,13 @@ private[decider] class LayeredPathConditionStack
     quantifiedExp(layers, quantifier, qvars, tQvars, triggers, tTriggers, name, isGlobal, ignore)
   }
 
-  def mark(): Mark = pushLayer()
+  def mark(): Mark = {
+    openNonScopeMarks += 1
+    pushLayer()
+  }
 
   def after(mark: Mark): RecordedPathConditions = {
-    val afterLength = layerCount - markToLength(mark)
+    val afterLength = layerCount - markHeights(mark)
     val afterLayers = layers.take(afterLength)
 
     new DefaultRecordedPathConditions(afterLayers)
@@ -655,20 +669,22 @@ private[decider] class LayeredPathConditionStack
   def isEmpty: Boolean = (
        layers.forall(_.branchCondition.isEmpty)
     && allAssumptions.isEmpty
-    && (markToLength.keySet -- scopeMarks).isEmpty)
+    && openNonScopeMarks == 0)
 
   override def duplicate(): LayeredPathConditionStack = {
     /* Attention: The original and its clone must not share any mutable data! */
 
-    val clonedStack = new LayeredPathConditionStack
+    val clonedStack = new LayeredPathConditionStack(initInitialScope = false)
 
     /* Sharing immutable data is safe */
     clonedStack.allAssumptions = allAssumptions
-    clonedStack.markToLength = markToLength
     clonedStack.scopeMarks = scopeMarks
+    clonedStack.knownBranchConditions = knownBranchConditions
 
     /* Mutable data is cloned */
-    clonedStack.markCounter = markCounter.clone()
+    clonedStack.markHeights = java.util.Arrays.copyOf(markHeights, nextMarkId.max(16))
+    clonedStack.nextMarkId = nextMarkId
+    clonedStack.openNonScopeMarks = openNonScopeMarks
     clonedStack.layers = layers map (_.clone().asInstanceOf[PathConditionStackLayer])
     clonedStack.layerCount = layerCount
 
@@ -707,11 +723,14 @@ private[decider] class LayeredPathConditionStack
 
     sb.append(sep)
 
-    val marks = markToLength.keySet -- scopeMarks
     sb.append("  marks:\n")
-    marks foreach (m => {
-      sb.append(s"    $m -> ${markToLength(m)} (${scopeMarks.contains(m)})\n")
-    })
+    var m = 0
+    while (m < nextMarkId) {
+      if (markHeights(m) >= 0 && !scopeMarks.contains(m)) {
+        sb.append(s"    $m -> ${markHeights(m)} (false)\n")
+      }
+      m += 1
+    }
 
     sb.result()
   }

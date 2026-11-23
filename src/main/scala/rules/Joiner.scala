@@ -56,7 +56,7 @@ object joiner extends JoiningRules {
 
     executionFlowController.locally(s, v)((s1, v1) => {
       val preMark = v1.decider.setPathConditionMark()
-      val s2 = s1.copy(underJoin = true)
+      val s2 = if (s1.underJoin) s1 else s1.copy(underJoin = true)
 
       block(s2, v1, (s3, data, v2) => {
         val s4 =
@@ -66,14 +66,26 @@ object joiner extends JoiningRules {
              * affected by the evaluation - such as the store (by let-bindings) or the heap (by
              * state consolidations) to their initial values.
              */
-            s3.copy(g = s1.g,
-                    h = s1.h,
-                    underJoin = s1.underJoin,
-                    // TODO: Evaluation should not affect partiallyConsumedHeap, probably
-                    ssCache = s1.ssCache,
-                    partiallyConsumedHeap = s1.partiallyConsumedHeap,
-                    invariantContexts = s1.invariantContexts,
-                    retrying = s1.retrying)
+            if (s3 eq s2) {
+              s1
+            } else if ((s3.g eq s1.g) &&
+                       (s3.h eq s1.h) &&
+                       (s3.underJoin == s1.underJoin) &&
+                       (s3.ssCache eq s1.ssCache) &&
+                       (s3.partiallyConsumedHeap eq s1.partiallyConsumedHeap) &&
+                       (s3.invariantContexts eq s1.invariantContexts) &&
+                       (s3.retrying == s1.retrying)) {
+              s3
+            } else {
+              s3.copy(g = s1.g,
+                      h = s1.h,
+                      underJoin = s1.underJoin,
+                      // TODO: Evaluation should not affect partiallyConsumedHeap, probably
+                      ssCache = s1.ssCache,
+                      partiallyConsumedHeap = s1.partiallyConsumedHeap,
+                      invariantContexts = s1.invariantContexts,
+                      retrying = s1.retrying)
+            }
           } else {
             // For more joins, state shouldn't be reset.
             s3

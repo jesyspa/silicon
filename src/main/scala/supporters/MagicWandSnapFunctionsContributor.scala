@@ -10,7 +10,6 @@ import viper.silicon.common.collections.immutable.InsertionOrderedSet
 import viper.silicon.interfaces.{PreambleContributor, PreambleReader}
 import viper.silicon.interfaces.decider.ProverLike
 import viper.silicon.state.terms.{Sort, SortDecl, sorts}
-import viper.silver.ast
 import viper.silver.ast.Program
 
 /**
@@ -40,7 +39,7 @@ class MagicWandSnapFunctionsContributor(preambleReader: PreambleReader[String, S
    */
   override def analyze(program: Program): Unit = {
     // If there are not magic wands, do not add any definitions or axioms
-    if (!program.existsDefined { case ast.MagicWand(_, _) => true }) return
+    if (!ProgramAnalysis.of(program).hasMagicWand) return
 
     collectedSorts = InsertionOrderedSet(sorts.MagicWandSnapFunction)
     collectedFunctionDecls = preambleReader.readPreamble(FILE_DECLARATIONS)
