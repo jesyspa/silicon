@@ -801,6 +801,18 @@ The follow-up used `2f646230` (current main at the time), Corretto 21, Z3 4.16.0
 | Bulk ordered set updates (`e75b1150`, `perf/ordered-set-delta`) | Avoids intermediate set wrappers, but Scala 2.13 already implements these operations incrementally: bytecode confirms `concat` starts from the existing immutable set and `removedAll` folds `excl` over the removals. It was not rebuilding the whole set. JVM CPU was 10.7% lower in the first paired run and 2.5% lower after swapping arms (second interval includes no change); outcomes matched in both runs. Heap allocation measurements did not consistently improve across three heavy inputs. Not landed on this evidence. |
 | Replay change plus lazy heap filtering (`42af602c`, `perf/prover-replay-bookkeeping`) | Builds the filtered heap only for properties that inspect multiple chunks. The combined arm was neutral on wall time (1.014 [0.989, 1.044]) with no outcome changes. On one heavy input it allocated less, but the replay-only arm reproduced that gain. No isolated gain shown for lazy filtering; not landed. |
 
+Follow-up allocation checks isolated the landed replay change on four more heavy files. Each file was run twice in fresh JVMs with garbage collection disabled, alternating build order. Positive deltas mean the candidate allocated more:
+
+| File | Candidate minus baseline, two runs |
+|---|---:|
+| `PokerHand_true` (original two runs) | −200, −147 MiB |
+| `arc_rwlock` | −68, −124 MiB |
+| `FollyRWSpinlockStronger_mod` | +4, +45 MiB |
+| `bam_load` | −73, +40 MiB |
+| `b-tree-buggy` | −18, +0.2 MiB |
+
+Reported verification outcomes and per-prover resource counts matched on all these pairs. The allocation savings repeated on two of the five checked inputs, not across the sample. Total JVM allocation includes JIT, frontend and other verifier work; these are not measurements of peak live heap. On the full warm slice, matching completed files summed to 150.1 → 149.3 s wall time, while the per-file geometric mean was 2.3% higher. Neither establishes a timing improvement.
+
 The useful split is to compare JVM-only changes with matched SMT command streams, then test solver-facing changes separately with enough seeds to catch changes in search. Shorter SMT and fewer resource units are useful diagnostics, not substitutes for elapsed time or outcomes.
 
 ## 12. Source index
