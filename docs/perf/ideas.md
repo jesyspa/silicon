@@ -789,7 +789,7 @@ The aggressive solver changes, taken together, cut `PokerHand_true` solver work 
 | Deduplicate statement branch checks | Evaluate the `if` condition once and avoid duplicate feasibility probes for the two outgoing edges. | Skipping the empty-else probes made `118-get_closest_vowel` time out. An earlier fusion also caused exponential exploration of dead paths in `secc-cddc`. |
 | Unordered consolidation pairs | Check each pair of chunks once instead of checking both orders for symmetric properties. | `list-buggy` went from about 8 s to timeout on both seeds in `cand7`. VerCors permutation examples took about 2–2.6× as much CPU even though Z3 recorded about half the resource units. |
 
-These edits were reverted before `4a3f6826`; that branch does not contain the rejected implementations, even behind flags. The local session transcript for `carey-1795374502` records the experimental edits (start with `wisp-info show carey --grep 'unorderedConsolidationPairs|dedupEdgeChecks|simplifyFormulas'`), the broad-run output (step 175), and the partial final diagnostic (steps 183–184). No corpus inputs are part of this record.
+These edits were reverted before `4a3f6826`. The early implementations of all three are archived on `archive/early-verifier-solver-experiments` (`7fb2c650`): the successful edits to the four experiment files in transcript steps 101 and 103, replayed onto `d26d4c0a`. The reconstruction compiles with the pinned Silver revision. It is not an exact copy of any measured build; the benchmark candidates also included other changes and later variants of these experiments. The local session transcript (`wisp-info show carey`) records the experimental edits, the broad-run output (step 175), and the partial final diagnostic (steps 183–184). No corpus inputs are part of this record.
 
 ## 22. Isolating verifier bookkeeping from solver search, 2026-11-23
 
@@ -813,7 +813,17 @@ Follow-up allocation checks isolated the landed replay change on four more heavy
 
 Reported verification outcomes and per-prover resource counts matched on all these pairs. The allocation savings repeated on two of the five checked inputs, not across the sample. Total JVM allocation includes JIT, frontend and other verifier work; these are not measurements of peak live heap. On the full warm slice, matching completed files summed to 150.1 → 149.3 s wall time, while the per-file geometric mean was 2.3% higher. Neither establishes a timing improvement.
 
-The useful split is to compare JVM-only changes with matched SMT command streams, then test solver-facing changes separately with enough seeds to catch changes in search. Shorter SMT and fewer resource units are useful diagnostics, not substitutes for elapsed time or outcomes.
+A separate run measured resident memory on the landed replay code, not the change in peak RAM. On the same 38-file slice, with a fresh Corretto 21 JVM per file (`-Xmx4g`), one verifier worker, Z3 4.16.0, seed 0 and a 45 s timeout, peak resident memory sampled every 50 ms was:
+
+| Per-file peak | Median | 90th percentile | Maximum |
+|---|---:|---:|---:|
+| JVM plus solver at the same instant | 472 MiB | 943 MiB | 3,589 MiB |
+| JVM alone | 382 MiB | 880 MiB | 3,527 MiB |
+| Solver processes alone | 71 MiB | 135 MiB | 977 MiB |
+
+The sample includes six timeouts. A warm JVM or more verifier workers may use more RAM, and sampling can miss short peaks. Do not subtract the total allocation savings above from these peaks.
+
+Next experiment: share the repeated quantified-resource walks across consumers without changing traversal or emission order. Compare that analysis alone against current main; check SMT command equality and verification outcomes before comparing warm JVM CPU and end-to-end time. Keep auxiliary-trigger changes separate and test them with multiple seeds. Shorter SMT and fewer resource units are useful diagnostics, not substitutes for elapsed time or outcomes.
 
 ## 12. Source index
 
