@@ -81,13 +81,18 @@ class DefaultQuantifierSupporter(triggerGenerator: TriggerGenerator) extends Qua
       case _ => t
     }
 
-    // TODO: Keep all heap-independent triggers under one quantifier instead of splitting
-    q.triggers
-      // : Seq[Trigger]
-      // Find heap dependencies for each trigger separately
-      .map({ case Trigger(ts) => (ts, ts.flatMap(computeHeapDeps))})
+    val (heapIndependent, heapDependent) = q.triggers
+      .map({ case Trigger(ts) => (ts, ts.flatMap(computeHeapDeps)) })
       .distinct
-      // : Seq[(Trigger, Seq[Term])]
+      .partition(_._2.isEmpty)
+
+    val grouped =
+      if (heapIndependent.isEmpty) Seq.empty
+      else Seq(Quantification(q.q, q.vars, q.body,
+        heapIndependent.map { case (ts, _) => Trigger(ts.map(replaceHeapDeps(_, Map.empty))) },
+        q.name, q.isGlobal))
+
+    grouped ++ heapDependent
       // Map all heap dependencies to fresh variables
       .map({ case (ts, deps) => (ts, deps.map(t => (t, fresh("proj", t.sort, Option.when(evaluator.debugOn)(PUnknown())))).toMap)})
       // : Seq[(Trigger, Map[Term, Var])]
