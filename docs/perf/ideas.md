@@ -825,6 +825,17 @@ The sample includes six timeouts. A warm JVM or more verifier workers may use mo
 
 Next experiment: share the repeated quantified-resource walks across consumers without changing traversal or emission order. Compare that analysis alone against current main; check SMT command equality and verification outcomes before comparing warm JVM CPU and end-to-end time. Keep auxiliary-trigger changes separate and test them with multiple seeds. Shorter SMT and fewer resource units are useful diagnostics, not substitutes for elapsed time or outcomes.
 
+## 23. Independent auxiliary-quantifier tests, 2026-11-23
+
+Neither change is a good default. The two arms changed one thing each relative to `db70a38e`. Each arm used 24 paired runs: both PokerHand variants and four VerCors permutations at seeds 0–3, warm JVM, Z3 4.16.0 and a 90 s timeout. Each baseline had four verifications and 20 expected failures; each candidate had four verifications, 19 expected failures and one timeout. The completed pairs reported the same errors.
+
+| Experiment | Effect | Why rejected |
+|---|---|---|
+| Omit auxiliary quantifiers with tautological bodies (`6757137b`, `exp/drop-tautological-aux`) | No clear PokerHand timing change; solver units identical on all eight PokerHand pairs. On `oddEven`, seed 3 took 82.9 → 13.3 s wall even as solver units rose from 24.6M to 48.8M. | `oddEven` seed 1 went from an expected failure in 40.2 s to a timeout. The fast seeds did not make this a reliable change. |
+| Combine heap-independent triggers on one auxiliary quantifier (`8f2ce5c3`, `exp/group-heap-independent-aux-triggers`) | PokerHand took 7.0–7.3% less wall time and 6.3–6.7% less total CPU (geometric means across the four seeds), with 38–44% fewer solver units. | `oddEven` seed 1 went from an expected failure in 38.8 s to a timeout. On seed 1, `quick` took 12.3 → 49.1 s wall while solver units fell from 32.8M to 8.5M; `selection` and `timsort1` also slowed down. |
+
+The run covered targeted cases, not a representative corpus slice. Neither arm was widened after the timeout regression. The timed-out solver did not report its final resource count, so comparisons of solver units exclude those pairs.
+
 ## 12. Source index
 
 - Section 20: data, scripts, replay logs and run index in `~/data/viper-corpus-results/lazy-optional-20261120/` (`README.md`).
