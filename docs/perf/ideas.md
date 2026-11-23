@@ -836,6 +836,15 @@ Neither change is a good default. The two arms changed one thing each relative t
 
 The run covered targeted cases, not a representative corpus slice. Neither arm was widened after the timeout regression. The timed-out solver did not report its final resource count, so comparisons of solver units exclude those pairs.
 
+## 24. Sharing quantified-resource AST scans, 2026-11-23
+
+**Not landed: no measured speedup.** `b3db3553` (`perf/share-quantified-resource-analysis`) shares the quantified field, predicate, wand and trigger analysis across the preamble and member consumers. It caches direct scan results and member summaries for one verification. It does not port the rest of `ProgramAnalysis`.
+
+- **Behavior:** 28 focused tests passed, two were canceled by annotation. Matching command streams after removing comment-only and blank lines on five inputs × two seeds (20 streams), with matching results, diagnostic messages and per-prover resource counts. All 76 pairs in the warm timing run also matched on outcomes and reported resource counts (28 verified, 36 expected failures and 12 timeouts per arm).
+- **Timing:** `db70a38e` baseline, Corretto 21, Z3 4.16.0, 38 stratified inputs, two paired seeds, one worker, 60 s cutoff, swapped CPU lanes between seeds. For the 32 files that completed on both seeds, candidate/baseline JVM CPU per-file geometric mean was 1.005 [0.960, 1.055] (95% bootstrap interval); wall was 0.999 [0.967, 1.032]. Sums of per-file medians were JVM CPU 97.2 → 96.8 s and wall 186.5 → 185.7 s.
+
+The rewrite avoids repeated walks but adds caches and still traverses member dependencies. This test did not measure their costs separately. Profile the analysis itself on large programs before extending this rewrite; the timing here does not justify adding the implementation to main.
+
 ## 12. Source index
 
 - Section 20: data, scripts, replay logs and run index in `~/data/viper-corpus-results/lazy-optional-20261120/` (`README.md`).
